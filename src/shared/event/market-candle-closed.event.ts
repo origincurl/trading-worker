@@ -1,0 +1,35 @@
+import type { MarketTickMarket, MarketTickProvider } from './market-tick.event';
+
+// `market.candle.closed` is delivered via Redis Streams (BUS_STREAMS), not
+// pub/sub — calculator and BE consumers need replay semantics. dedup key is
+// (provider, marketEnv, symbol, intervalType, bucketStart).
+export const MARKET_CANDLE_CLOSED_EVENT_TYPE = 'market.candle.closed';
+export const MARKET_CANDLE_CLOSED_SCHEMA_VERSION = 1;
+export const MARKET_CANDLE_CLOSED_STREAM = 'market.candle.closed';
+
+export type CandleInterval = '1m';
+
+export interface MarketCandleClosedPayload {
+  readonly provider: MarketTickProvider;
+  readonly marketEnv: 'mock' | 'production';
+  readonly symbol: string;
+  readonly market: MarketTickMarket;
+  readonly intervalType: CandleInterval;
+  readonly bucketStart: string;
+  readonly bucketEnd: string;
+  readonly open: number;
+  readonly high: number;
+  readonly low: number;
+  readonly close: number;
+  readonly volume: number;
+  readonly tickCount: number;
+  readonly firstSourceTs: string;
+  readonly lastSourceTs: string;
+  readonly cumulativeVolumeFirst: number | null;
+  readonly cumulativeVolumeLast: number | null;
+  readonly cumulativeVolumeAnomalies: number;
+  // `realtime` ingests came off WS; `backfill` from chart REST (Phase 6.10).
+  // PK upsert in the repo treats realtime as the source of truth — backfill
+  // never overwrites a realtime candle for the same bucket.
+  readonly dataSource: 'realtime' | 'backfill';
+}

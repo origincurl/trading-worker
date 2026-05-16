@@ -1,0 +1,112 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: worker
+      POSTGRES_PASSWORD: worker
+      POSTGRES_DB: worker
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U worker']
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 2s
+      timeout: 2s
+      retries: 20
+
+  migrate:
+    build: .
+    command: ['node', 'dist/scripts/migrate.js']
+    environment:
+      WORKER_DATABASE_URL: postgresql://worker:worker@postgres:5432/worker
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  worker-collector:
+    build: .
+    environment:
+      NODE_ENV: development
+      ROLES: collector
+      WORKER_INSTANCE_ID: dev-collector
+      PORT: 4002
+      KIWOOM_MARKET_ENV: mock
+      KIWOOM_WS_URL: wss://mockapi.kiwoom.com:10000/api/dostk/websocket
+      KIWOOM_REST_URL: https://mockapi.kiwoom.com
+      BE_CONTROL_PLANE_URL: http://localhost:4000
+      BE_HMAC_SECRET: dev-hmac-secret-changeme-16
+      BE_CONTROL_PLANE_MOCK: 'true'
+      WORKER_DATABASE_URL: postgresql://worker:worker@postgres:5432/worker
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ['4002:4002']
+
+  worker-calculator:
+    build: .
+    environment:
+      NODE_ENV: development
+      ROLES: calculator
+      WORKER_INSTANCE_ID: dev-calculator
+      PORT: 4002
+      KIWOOM_MARKET_ENV: mock
+      BE_CONTROL_PLANE_URL: http://localhost:4000
+      BE_HMAC_SECRET: dev-hmac-secret-changeme-16
+      BE_CONTROL_PLANE_MOCK: 'true'
+      WORKER_DATABASE_URL: postgresql://worker:worker@postgres:5432/worker
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ['4003:4002']
+
+  worker-executor:
+    build: .
+    environment:
+      NODE_ENV: development
+      ROLES: executor
+      WORKER_INSTANCE_ID: dev-executor
+      PORT: 4002
+      KIWOOM_MARKET_ENV: mock
+      KIWOOM_WS_URL: wss://mockapi.kiwoom.com:10000/api/dostk/websocket
+      KIWOOM_REST_URL: https://mockapi.kiwoom.com
+      BE_CONTROL_PLANE_URL: http://localhost:4000
+      BE_HMAC_SECRET: dev-hmac-secret-changeme-16
+      BE_CONTROL_PLANE_MOCK: 'true'
+      WORKER_DATABASE_URL: postgresql://worker:worker@postgres:5432/worker
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ['4004:4002']
+
+  worker-detector:
+    build: .
+    environment:
+      NODE_ENV: development
+      ROLES: detector
+      WORKER_INSTANCE_ID: dev-detector
+      PORT: 4002
+      KIWOOM_MARKET_ENV: mock
+      BE_CONTROL_PLANE_URL: http://localhost:4000
+      BE_HMAC_SECRET: dev-hmac-secret-changeme-16
+      BE_CONTROL_PLANE_MOCK: 'true'
+      WORKER_DATABASE_URL: postgresql://worker:worker@postgres:5432/worker
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      migrate: { condition: service_completed_successfully }
+    ports: ['4005:4002']

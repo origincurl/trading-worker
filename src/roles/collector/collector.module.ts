@@ -1,5 +1,4 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
-import { ScheduleModule } from '@nestjs/schedule';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
@@ -32,7 +31,6 @@ import { RefreshUniverseUsecase } from './usecase/refresh-universe.usecase';
 
 @Module({
   imports: [
-    ScheduleModule.forRoot(),
     BrokerageModule,
     BeControlPlaneModule,
     TypeOrmModule.forFeature([CandleEntity, DeadLetterEntity]),

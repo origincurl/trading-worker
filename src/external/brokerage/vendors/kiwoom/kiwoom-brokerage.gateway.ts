@@ -67,6 +67,14 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
 
   private reconnectAttempts = 0;
 
+  // Counts LOGIN-class failures across the whole gateway lifetime, not
+  // just within one scheduleReconnect run. Resets only on a successful
+  // LOGIN ack or on a user-initiated disconnect (via the admin reconnect
+  // endpoint, which goes through disconnectMarketDataStream).
+  private consecutiveLoginFailures = 0;
+
+  private loginHalted = false;
+
   private reconnecting = false;
 
   constructor(private readonly opts: KiwoomBrokerageGatewayOptions) {
@@ -75,6 +83,13 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
 
   get profile(): BrokerageGatewayProfile {
     return this.opts.profile;
+  }
+
+  // Exposed for the admin credential probe — calling getAccessToken()
+  // on this exercises the real /oauth2/token path. Never inspect or log
+  // the returned token value outside the gateway.
+  get tokenService(): KiwoomTokenService {
+    return this.opts.tokenService;
   }
 
   async getAccountBalance(input: GetAccountBalanceInput): Promise<AccountBalanceModel> {
@@ -131,12 +146,31 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
 
     this.userInitiatedDisconnect = false;
 
+    // Fresh stream → clear any prior halt state so a re-armed reconnect
+    // path is clean. Boot calls this once; admin can call it again after
+    // disconnectMarketDataStream.
+    this.consecutiveLoginFailures = 0;
+
+    this.loginHalted = false;
+
     this.opts.wsClient.onMessage((parsed) => this.routeFrame(parsed));
 
     this.opts.wsClient.onClose((code, reason) => {
       this.loggedIn = false;
 
       if (this.userInitiatedDisconnect) return;
+
+      // Once we've halted because LOGIN keeps failing, don't restart on
+      // every subsequent server close — that would loop forever waiting
+      // for the operator to rotate the token. Operator unblocks via
+      // POST /admin/ws/reconnect (which clears the halt flag).
+      if (this.loginHalted) {
+        this.logger.debug(
+          `ws close code=${code} reason="${reason}" ignored — reconnect halted (token rotation required)`,
+        );
+
+        return;
+      }
 
       if (this.opts.reconnect?.enabled) {
         this.logger.warn(
@@ -160,6 +194,13 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
     this.loggedIn = false;
 
     this.frameHandler = null;
+
+    // Operator-issued disconnect (e.g. POST /admin/ws/reconnect) implies
+    // the token has been rotated — clear the halt so the next
+    // connectMarketDataStream + close-event chain can run reconnect again.
+    this.consecutiveLoginFailures = 0;
+
+    this.loginHalted = false;
 
     await this.opts.wsClient.disconnect();
   }
@@ -354,6 +395,16 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
 
         if (this.userInitiatedDisconnect) return;
 
+        // Defensive disconnect: a previous attempt may have left the
+        // socket OPEN (LOGIN failure does not auto-close), and connect()
+        // throws KIWOOM_WS_ALREADY_CONNECTED on a non-null socket. The
+        // disconnect is idempotent — no-op if already closed.
+        try {
+          await this.opts.wsClient.disconnect();
+        } catch {
+          // best-effort cleanup; swallow and try to connect anyway
+        }
+
         try {
           await this.opts.wsClient.connect();
 
@@ -363,13 +414,42 @@ export class KiwoomBrokerageGateway implements BrokerageGateway {
 
           this.reconnectAttempts = 0;
 
+          this.consecutiveLoginFailures = 0;
+
           this.logger.log('reconnect ok');
 
           return;
         } catch (err) {
-          this.logger.warn(
-            `reconnect attempt ${this.reconnectAttempts} failed: ${err instanceof Error ? err.message : err}`,
-          );
+          const message = err instanceof Error ? err.message : String(err);
+
+          this.logger.warn(`reconnect attempt ${this.reconnectAttempts} failed: ${message}`);
+
+          // LOGIN failures: token might be stale even though our cache
+          // says it's valid (Kiwoom server-side revocation, clock skew,
+          // etc). Invalidate the cache so the next attempt re-issues
+          // via /oauth2/token. Counter is on the instance so separate
+          // scheduleReconnect invocations accumulate toward the cap.
+          // After cap (3), halt — the appKey/appSecret themselves are
+          // probably rejected (Kiwoom returncode != token expiry).
+          if (isLoginFailure(err)) {
+            this.opts.tokenService.invalidateCache();
+
+            this.consecutiveLoginFailures += 1;
+
+            if (this.consecutiveLoginFailures >= 3) {
+              this.loginHalted = true;
+
+              this.logger.error(
+                'reconnect halted: LOGIN keeps failing — appKey/appSecret may be wrong or revoked. Verify credentials then POST /admin/ws/reconnect.',
+              );
+
+              return;
+            }
+          } else {
+            // Non-LOGIN failures (network, etc.) reset the LOGIN counter
+            // so a transient outage doesn't burn through the cap.
+            this.consecutiveLoginFailures = 0;
+          }
         }
       }
     } finally {
@@ -421,6 +501,17 @@ const KIND_TO_REALTIME_TYPE: Record<MarketDataFrameKind, string> = {
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isLoginFailure(err: unknown): boolean {
+  if (!(err instanceof IntegrationError)) return false;
+
+  const message = err.message ?? '';
+
+  // installLoginAckGate throws with this exact prefix when LOGIN ack
+  // carries a non-zero return_code. Catching by message keeps the
+  // detection cheap — IntegrationError doesn't carry a typed code yet.
+  return message.startsWith('Kiwoom LOGIN failed') || message === 'Kiwoom LOGIN ack timeout';
 }
 
 function sleep(ms: number): Promise<void> {

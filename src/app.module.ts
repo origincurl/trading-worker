@@ -1,4 +1,5 @@
 import { DynamicModule, Module, type Type } from '@nestjs/common';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AdminModule } from '@admin/admin.module';
 import { ConfigModule, type ValidatedConfig } from '@config/config.module';
 import type { WorkerRole } from '@config/runtime.config';
@@ -37,6 +38,11 @@ export class AppModule {
         RedisModule,
         BusModule,
         EventModule,
+        // ScheduleModule.forRoot() MUST be registered exactly once at the
+        // root so @Interval handlers don't double-fire. Previously each
+        // role module imported it, which made every scheduler tick twice
+        // when collector + detector were loaded together.
+        ScheduleModule.forRoot(),
         HealthModule,
         AdminModule,
         ...roleModules,

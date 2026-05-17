@@ -1,6 +1,9 @@
+import { Logger } from '@nestjs/common';
 import { plainToInstance } from 'class-transformer';
 import { IsEnum, IsOptional, IsString, validateSync } from 'class-validator';
 import type { WorkerRole } from './runtime.config';
+
+const logger = new Logger('KiwoomConfig');
 
 export enum KiwoomMarketEnv {
   Mock = 'mock',
@@ -45,12 +48,6 @@ export class KiwoomConfigDto {
   @IsOptional()
   @IsString()
   KIWOOM_EXECUTOR_APP_SECRET?: string;
-
-  // Phase 6 bootstrap. Until /oauth2/token integration lands in Phase 6.8 +
-  // token refresh, collector relies on a pre-issued static token here.
-  @IsOptional()
-  @IsString()
-  KIWOOM_ACCESS_TOKEN?: string;
 }
 
 export interface KiwoomConfig {
@@ -65,9 +62,6 @@ export interface KiwoomConfig {
     appKey: string;
     appSecret: string;
   };
-  // Pre-issued vendor access token. Shared across profiles until token
-  // service implements OAuth2 issuance — see kiwoom-token.service.ts.
-  readonly accessToken?: string;
 }
 
 function hostMatches(url: string | undefined, expectedHost: string): boolean {
@@ -94,7 +88,6 @@ export function loadKiwoomConfig(
     KIWOOM_COLLECTOR_APP_SECRET: env.KIWOOM_COLLECTOR_APP_SECRET ?? env.KIWOOM_APP_SECRET,
     KIWOOM_EXECUTOR_APP_KEY: env.KIWOOM_EXECUTOR_APP_KEY,
     KIWOOM_EXECUTOR_APP_SECRET: env.KIWOOM_EXECUTOR_APP_SECRET,
-    KIWOOM_ACCESS_TOKEN: env.KIWOOM_ACCESS_TOKEN,
   });
 
   const errors = validateSync(dto, { whitelist: false });
@@ -152,9 +145,39 @@ export function loadKiwoomConfig(
   }
 
   if (collector && executor && collector.appKey === executor.appKey) {
-    throw new Error(
-      'KIWOOM_COLLECTOR_APP_KEY and KIWOOM_EXECUTOR_APP_KEY must be different (vendor credential isolation)',
+    const allowSameKey = env.KIWOOM_ALLOW_SAME_KEY === 'true' || env.KIWOOM_ALLOW_SAME_KEY === '1';
+
+    if (!allowSameKey) {
+      throw new Error(
+        'KIWOOM_COLLECTOR_APP_KEY and KIWOOM_EXECUTOR_APP_KEY must be different (vendor credential isolation). ' +
+          'Set KIWOOM_ALLOW_SAME_KEY=true to bypass for local dev only — NEVER use in production.',
+      );
+    }
+
+    if (dto.KIWOOM_MARKET_ENV === 'production') {
+      throw new Error(
+        'KIWOOM_ALLOW_SAME_KEY=true is FORBIDDEN when KIWOOM_MARKET_ENV=production. ' +
+          'Collector and executor MUST use distinct vendor credentials in production (rate-budget isolation).',
+      );
+    }
+
+    logger.warn(
+      `KIWOOM_ALLOW_SAME_KEY=true — collector/executor share the same vendor key. ` +
+        `Local dev only. Rate-budget isolation guarantees are VOID in this mode.`,
     );
+
+    // Kiwoom WS server allows only ONE session per app key. Loading
+    // BOTH roles in the same process with a shared key triggers an
+    // endless eviction loop (each new LOGIN kicks the prior session).
+    // The collector + executor combo MUST split into separate processes
+    // when keys are shared.
+    if (needsCollector && needsExecutor) {
+      throw new Error(
+        'KIWOOM_ALLOW_SAME_KEY=true with ROLES containing both collector and executor is not supported. ' +
+          'Kiwoom WS allows one session per app key — the shared key produces an endless reconnect loop. ' +
+          'Either (a) set ROLES to a single role, or (b) provide distinct KIWOOM_COLLECTOR_APP_KEY / KIWOOM_EXECUTOR_APP_KEY.',
+      );
+    }
   }
 
   return {
@@ -163,7 +186,6 @@ export function loadKiwoomConfig(
     restUrl: dto.KIWOOM_REST_URL,
     collector,
     executor,
-    accessToken: dto.KIWOOM_ACCESS_TOKEN,
   };
 }
 

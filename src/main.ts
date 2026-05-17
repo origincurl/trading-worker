@@ -1,4 +1,4 @@
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe, type LogLevel } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { config as loadDotenv } from 'dotenv';
@@ -7,6 +7,19 @@ import { AppModule } from './app.module';
 import { AllExceptionFilter } from './common/filter/all-exception.filter';
 import { validateEnv } from './config/config.module';
 import { NodeEnv } from './config/runtime.config';
+
+const VALID_LOG_LEVELS: readonly LogLevel[] = ['log', 'error', 'warn', 'debug', 'verbose', 'fatal'];
+
+function resolveLogLevels(env: NodeJS.ProcessEnv): LogLevel[] | undefined {
+  const raw = env.LOG_LEVEL?.trim();
+
+  if (!raw) return undefined;
+
+  const requested = raw.split(',').map((s) => s.trim().toLowerCase());
+  const valid = requested.filter((l): l is LogLevel => VALID_LOG_LEVELS.includes(l as LogLevel));
+
+  return valid.length > 0 ? valid : undefined;
+}
 
 async function bootstrap() {
   loadDotenv({ path: '.env.local', override: false });
@@ -21,8 +34,11 @@ async function bootstrap() {
     `Booting worker instance=${validated.runtime.workerInstanceId} env=${validated.runtime.nodeEnv} roles=[${validated.runtime.roles.join(',')}]`,
   );
 
+  const logLevels = resolveLogLevels(process.env) ?? ['log', 'warn', 'error', 'fatal'];
+
   const app = await NestFactory.create(AppModule.register(validated), {
     bufferLogs: false,
+    logger: logLevels,
   });
 
   app.useGlobalPipes(

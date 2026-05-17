@@ -28,7 +28,6 @@ function buildKiwoomGateway(
     appKey: credentials?.appKey ?? '',
     appSecret: credentials?.appSecret ?? '',
     restUrl: config.restUrl,
-    staticToken: config.accessToken,
   });
 
   // Profile-tuned rate budgets. Numbers are conservative placeholders —

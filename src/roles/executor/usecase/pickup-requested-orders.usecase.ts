@@ -27,7 +27,8 @@ import type { OrderModel } from '@shared/model/order/order.model';
 const DEFAULT_BATCH_SIZE = 20;
 
 // Phase J: drains REQUESTED orders the BE has written into the shared
-// `orders` table. For every row we flip status REQUESTED -> SUBMITTING,
+// `orders` table. The repository atomically claims rows by flipping
+// REQUESTED -> SUBMITTING before returning them. For every claimed row we
 // resolve the account-scoped vendor credential, fire
 // EXECUTOR_BROKERAGE_VENDOR.placeOrderForAccount, and translate the
 // outcome into the ACCEPTED / REJECTED / FAILED terminal status update.
@@ -66,21 +67,6 @@ export class PickupRequestedOrdersUsecase {
   }
 
   private async processOne(order: OrderModel): Promise<void> {
-    // SUBMITTING flip happens before the vendor call so a crash mid-call
-    // leaves the row in SUBMITTING (visible, recoverable) rather than
-    // letting the next pickup tick double-place it. acceptedAt cleared
-    // defensively in case a previous attempt set it.
-    const transitioned = await this.orders.updateStatus(order.id, {
-      status: OrderStatus.Submitting,
-      acceptedAt: null,
-    });
-
-    if (!transitioned) {
-      this.logger.debug(`order id=${order.id} not transitioned to SUBMITTING (race)`);
-
-      return;
-    }
-
     const placeInput = this.toPlaceInput(order);
 
     try {

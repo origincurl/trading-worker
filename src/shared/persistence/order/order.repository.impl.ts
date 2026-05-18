@@ -1,6 +1,6 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { OrderStatus } from '@shared/model/order/order-status.enum';
 import type { OrderModel } from '@shared/model/order/order.model';
 import { OrderEntity } from './order.entity';
@@ -19,11 +19,15 @@ export class OrderRepositoryImpl implements OrderRepository {
   ) {}
 
   async findRequestedBatch(batchSize: number): Promise<OrderModel[]> {
-    return this.findBatch(OrderStatus.Requested, batchSize);
+    return this.claimBatch(OrderStatus.Requested, OrderStatus.Submitting, batchSize);
   }
 
   async findCancellingBatch(batchSize: number): Promise<OrderModel[]> {
-    return this.findBatch(OrderStatus.CancelRequested, batchSize);
+    return this.claimBatch(
+      OrderStatus.CancelRequested,
+      OrderStatus.CancelSubmitting,
+      batchSize,
+    );
   }
 
   async createDecisionOrder(input: CreateDecisionOrderInput): Promise<OrderModel> {
@@ -109,19 +113,40 @@ export class OrderRepositoryImpl implements OrderRepository {
     return (result.affected ?? 0) > 0;
   }
 
-  // SKIP LOCKED pickup for concurrent worker pods. Returns models — caller
-  // typically updates status='SUBMITTING' immediately after.
-  private async findBatch(status: OrderStatus, batchSize: number): Promise<OrderModel[]> {
+  // SKIP LOCKED atomic claim for concurrent worker pods. The select lock and
+  // status transition live in one transaction, so rows remain claimed after
+  // the transaction commits and cannot be picked by another executor tick.
+  private async claimBatch(
+    fromStatus: OrderStatus,
+    claimStatus: OrderStatus,
+    batchSize: number,
+  ): Promise<OrderModel[]> {
     if (!this.repo || batchSize <= 0) return [];
 
-    const rows = await this.repo
-      .createQueryBuilder('o')
-      .where('o.status = :status', { status })
-      .orderBy('o.id', 'ASC')
-      .limit(batchSize)
-      .setLock('pessimistic_write')
-      .setOnLocked('skip_locked')
-      .getMany();
+    const rows = await this.repo.manager.transaction(async (manager) => {
+      const txRepo = manager.getRepository(OrderEntity);
+      const picked = await txRepo
+        .createQueryBuilder('o')
+        .where('o.status = :status', { status: fromStatus })
+        .orderBy('o.id', 'ASC')
+        .limit(batchSize)
+        .setLock('pessimistic_write')
+        .setOnLocked('skip_locked')
+        .getMany();
+
+      if (picked.length === 0) return [];
+
+      await txRepo.update(
+        { id: In(picked.map((row) => row.id)) },
+        { status: claimStatus } as Record<string, unknown>,
+      );
+
+      for (const row of picked) {
+        row.status = claimStatus;
+      }
+
+      return picked;
+    });
 
     return rows.map((r) => r.toModel());
   }

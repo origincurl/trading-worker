@@ -6,6 +6,7 @@ export enum OrderStatus {
   PartiallyFilled = 'PARTIALLY_FILLED',
   Filled = 'FILLED',
   CancelRequested = 'CANCEL_REQUESTED',
+  CancelSubmitting = 'CANCEL_SUBMITTING',
   Cancelled = 'CANCELLED',
   Rejected = 'REJECTED',
   Failed = 'FAILED',

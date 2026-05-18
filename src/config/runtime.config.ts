@@ -7,7 +7,14 @@ export enum NodeEnv {
   Test = 'test',
 }
 
-export const KNOWN_ROLES = ['collector', 'calculator', 'executor', 'detector'] as const;
+export const KNOWN_ROLES = [
+  'collector',
+  'calculator',
+  'executor',
+  'detector',
+  'tracker',
+  'notifier',
+] as const;
 
 export type WorkerRole = (typeof KNOWN_ROLES)[number];
 

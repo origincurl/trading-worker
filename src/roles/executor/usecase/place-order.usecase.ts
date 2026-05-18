@@ -1,12 +1,30 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { DomainError } from '@common/error/domain.error';
-import {
-  BE_CONTROL_PLANE_CLIENT,
-  type BeControlPlaneClient,
-} from '@external/be-control-plane/client/be-control-plane.client';
-import { EXECUTOR_BROKERAGE_GATEWAY } from '@external/brokerage/brokerage.token';
-import type { BrokerageGateway } from '@external/brokerage/gateway/brokerage.gateway';
+import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
+import { EXECUTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
+import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
 import { ExecutorOrderService } from '@roles/executor/service/executor-order.service';
+import { BUS_STREAMS } from '@shared/bus/bus.token';
+import type { BusStreams } from '@shared/bus/bus-streams.interface';
+import {
+  DECISION_MADE_EVENT_TYPE,
+  DECISION_MADE_SCHEMA_VERSION,
+  DECISION_MADE_STREAM,
+  type DecisionMadePayload,
+} from '@shared/event/decision-made.event';
+import { WorkerEventFactory } from '@shared/event/event-factory';
+import {
+  ORDER_FAILED_EVENT_TYPE,
+  ORDER_FAILED_SCHEMA_VERSION,
+  ORDER_FAILED_STREAM,
+  type OrderFailedPayload,
+} from '@shared/event/order-failed.event';
+import {
+  ORDER_PLACED_EVENT_TYPE,
+  ORDER_PLACED_SCHEMA_VERSION,
+  ORDER_PLACED_STREAM,
+  type OrderPlacedPayload,
+} from '@shared/event/order-placed.event';
 import type { SignalDetectedJobPayload } from '@shared/event/signal-detected.event';
 
 @Injectable()
@@ -20,9 +38,11 @@ export class PlaceOrderUsecase {
   private _lastSignalAt: Date | null = null;
 
   constructor(
-    @Inject(EXECUTOR_BROKERAGE_GATEWAY) private readonly gateway: BrokerageGateway,
-    @Inject(BE_CONTROL_PLANE_CLIENT) private readonly be: BeControlPlaneClient,
+    @Inject(EXECUTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
+    @Inject(BUS_STREAMS) private readonly streams: BusStreams,
+    @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
     private readonly orderService: ExecutorOrderService,
+    private readonly eventFactory: WorkerEventFactory,
   ) {}
 
   placedCount(): number {
@@ -75,22 +95,17 @@ export class PlaceOrderUsecase {
       return;
     }
 
-    // BE audit hook — fire-and-forget. BE retains its own copy of the
-    // signal independent of worker outcome.
-    await this.be
-      .reportSignalDetected({
-        signalId: payload.signalId,
-        accountId: payload.accountId,
-        symbol: payload.symbol,
-        strategy: payload.strategy,
-        detectedAt: payload.detectedAt,
-        payload: { side: payload.side, quantity: payload.quantity, price: payload.price ?? null },
-      })
-      .catch((err) =>
-        this.logger.warn(
-          `BE reportSignalDetected failed: ${err instanceof Error ? err.message : err}`,
-        ),
-      );
+    // Phase F: BE reportSignalDetected removed — decision.made stream
+    // event below carries the same information; notifier persists it.
+
+    // Stream `decision.made` ahead of vendor call so notifier sees the
+    // decision even if the order then fails. Best-effort — a stream hiccup
+    // must not block placement.
+    await this.produceDecisionMade(payload).catch((err) =>
+      this.logger.warn(
+        `decision.made produce failed signalId=${payload.signalId}: ${err instanceof Error ? err.message : err}`,
+      ),
+    );
 
     try {
       const ack = await this.gateway.placeOrder({
@@ -106,6 +121,13 @@ export class PlaceOrderUsecase {
       await this.orderService.markAccepted(prepared.clientOrderId, ack.vendorOrderId);
 
       this._placedCount += 1;
+
+      await this.produceOrderPlaced(payload, prepared.clientOrderId, ack.vendorOrderId).catch(
+        (err) =>
+          this.logger.warn(
+            `order.placed produce failed signalId=${payload.signalId}: ${err instanceof Error ? err.message : err}`,
+          ),
+      );
     } catch (err) {
       this._rejectedCount += 1;
 
@@ -115,6 +137,94 @@ export class PlaceOrderUsecase {
       await this.orderService.markFailed(prepared.clientOrderId, code, message);
 
       this.logger.warn(`placeOrder failed signalId=${payload.signalId}: ${message}`);
+
+      await this.produceOrderFailed(payload, prepared.clientOrderId, code, message).catch((e) =>
+        this.logger.warn(
+          `order.failed produce failed signalId=${payload.signalId}: ${e instanceof Error ? e.message : e}`,
+        ),
+      );
     }
+  }
+
+  private async produceDecisionMade(payload: SignalDetectedJobPayload): Promise<void> {
+    const decisionPayload: DecisionMadePayload = {
+      accountExternalId: payload.accountId,
+      brokerage: payload.provider,
+      marketEnv: this.kiwoom.marketEnv,
+      sourceStrategyEventCode: payload.strategy,
+      decisionType: payload.side === 'buy' ? 'BUY' : 'SELL',
+      symbol: payload.symbol,
+      score: null,
+      quantity: String(payload.quantity),
+      price: payload.price !== undefined ? String(payload.price) : null,
+      amount: null,
+      reason: null,
+      decidedAt: payload.detectedAt,
+    };
+
+    const event = this.eventFactory.build({
+      eventType: DECISION_MADE_EVENT_TYPE,
+      schemaVersion: DECISION_MADE_SCHEMA_VERSION,
+      role: 'executor',
+      payload: decisionPayload,
+    });
+
+    await this.streams.produce(DECISION_MADE_STREAM, event);
+  }
+
+  private async produceOrderPlaced(
+    payload: SignalDetectedJobPayload,
+    clientOrderId: string,
+    vendorOrderId: string,
+  ): Promise<void> {
+    const placedPayload: OrderPlacedPayload = {
+      accountExternalId: payload.accountId,
+      brokerage: payload.provider,
+      marketEnv: this.kiwoom.marketEnv,
+      externalOrderId: vendorOrderId,
+      clientOrderId,
+      symbol: payload.symbol,
+      orderType: payload.side === 'buy' ? 'BUY' : 'SELL',
+      orderMethod: payload.orderType === 'limit' ? 'LIMIT' : 'MARKET',
+      quantity: String(payload.quantity),
+      price: payload.price !== undefined ? String(payload.price) : null,
+      placedAt: new Date().toISOString(),
+    };
+
+    const event = this.eventFactory.build({
+      eventType: ORDER_PLACED_EVENT_TYPE,
+      schemaVersion: ORDER_PLACED_SCHEMA_VERSION,
+      role: 'executor',
+      payload: placedPayload,
+    });
+
+    await this.streams.produce(ORDER_PLACED_STREAM, event);
+  }
+
+  private async produceOrderFailed(
+    payload: SignalDetectedJobPayload,
+    clientOrderId: string,
+    errorCode: string,
+    reason: string,
+  ): Promise<void> {
+    const failedPayload: OrderFailedPayload = {
+      accountExternalId: payload.accountId,
+      brokerage: payload.provider,
+      marketEnv: this.kiwoom.marketEnv,
+      clientOrderId,
+      symbol: payload.symbol,
+      reason,
+      errorCode,
+      failedAt: new Date().toISOString(),
+    };
+
+    const event = this.eventFactory.build({
+      eventType: ORDER_FAILED_EVENT_TYPE,
+      schemaVersion: ORDER_FAILED_SCHEMA_VERSION,
+      role: 'executor',
+      payload: failedPayload,
+    });
+
+    await this.streams.produce(ORDER_FAILED_STREAM, event);
   }
 }

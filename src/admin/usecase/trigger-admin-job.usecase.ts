@@ -2,8 +2,8 @@ import { Inject, Injectable, Logger, type Type } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { RUNTIME_CONFIG, type RuntimeConfig, type WorkerRole } from '@config/runtime.config';
 import { CandleFlushScheduler } from '@roles/collector/trigger/scheduler/candle-flush.scheduler';
-import { ChartBackfillScheduler } from '@roles/collector/trigger/scheduler/chart-backfill.scheduler';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
+import { SyncStockListUsecase } from '@roles/collector/usecase/sync-stock-list.usecase';
 import { EvaluateAlertsUsecase } from '@roles/detector/usecase/evaluate-alerts.usecase';
 import {
   AdminJobKind,
@@ -33,10 +33,12 @@ const JOB_BINDINGS: Record<AdminJobKind, JobBinding> = {
     // Reuses the shutdown drain — it's idempotent and operator-safe.
     invoke: (i) => (i as CandleFlushScheduler).onApplicationShutdown(),
   },
-  [AdminJobKind.ChartBackfillPoll]: {
+  [AdminJobKind.StockListSync]: {
     owner: 'collector',
-    token: ChartBackfillScheduler,
-    invoke: (i) => (i as ChartBackfillScheduler).tick(),
+    token: SyncStockListUsecase,
+    invoke: async (i) => {
+      await (i as SyncStockListUsecase).execute();
+    },
   },
   [AdminJobKind.AlertEval]: {
     owner: 'detector',

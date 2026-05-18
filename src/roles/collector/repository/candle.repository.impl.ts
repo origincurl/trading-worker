@@ -39,10 +39,10 @@ export class CandleRepositoryImpl implements CandleRepository {
       },
     });
 
-    // Realtime > backfill. If a realtime row already sits at this bucket,
-    // never let a later backfill overwrite it (chart REST has lower
+    // Realtime > catchup. If a realtime row already sits at this bucket,
+    // never let a later catchup overwrite it (chart REST has lower
     // fidelity than tick-level aggregation).
-    if (existing && existing.dataSource === 'realtime' && payload.dataSource === 'backfill') {
+    if (existing && existing.dataSource === 'realtime' && payload.dataSource === 'catchup') {
       return 'skipped';
     }
 

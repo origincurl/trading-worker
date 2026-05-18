@@ -8,10 +8,14 @@ import { CalculatorModule } from '@roles/calculator/calculator.module';
 import { CollectorModule } from '@roles/collector/collector.module';
 import { DetectorModule } from '@roles/detector/detector.module';
 import { ExecutorModule } from '@roles/executor/executor.module';
+import { NotifierModule } from '@roles/notifier/notifier.module';
+import { TrackerModule } from '@roles/tracker/tracker.module';
 import { BusModule } from '@shared/bus/bus.module';
 import { RedisModule } from '@shared/cache/redis.module';
+import { CryptoModule } from '@shared/crypto/crypto.module';
 import { EventModule } from '@shared/event/event.module';
 import { PersistenceModule } from '@shared/persistence/persistence.module';
+import { PolicyModule } from '@shared/policy/policy.module';
 
 // External vendor / BE modules are deliberately NOT imported here. Each
 // role module pulls in only what it needs (architecture.md §10): a
@@ -23,6 +27,8 @@ const ROLE_MODULES: Record<WorkerRole, Type<unknown>> = {
   calculator: CalculatorModule,
   executor: ExecutorModule,
   detector: DetectorModule,
+  tracker: TrackerModule,
+  notifier: NotifierModule,
 };
 
 @Module({})
@@ -35,6 +41,7 @@ export class AppModule {
       imports: [
         ConfigModule.register(config),
         PersistenceModule.register(config.persistence),
+        CryptoModule,
         RedisModule,
         BusModule,
         EventModule,
@@ -43,6 +50,7 @@ export class AppModule {
         // role module imported it, which made every scheduler tick twice
         // when collector + detector were loaded together.
         ScheduleModule.forRoot(),
+        PolicyModule,
         HealthModule,
         AdminModule,
         ...roleModules,

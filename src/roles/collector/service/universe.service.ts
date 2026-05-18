@@ -1,68 +1,120 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { DomainError } from '@common/error/domain.error';
-import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
-import type { UniverseLeaseModel } from '@external/be-control-plane/model/universe-lease.model';
+import { shouldHandle } from '@common/util/shard';
+import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
+import type {
+  ObservedSymbolModel,
+  ObservedSymbolSource,
+} from '@shared/model/universe/observed-symbol.model';
 
-// Holds the BE-approved universe snapshot in memory and validates env
-// isolation. Phase 6.7 enforces:
-//   - snapshot.marketEnv MUST match worker's KIWOOM_MARKET_ENV
-//   - snapshot.version is monotonic; older versions are rejected silently
-//   - symbols are deduplicated and sorted (deterministic shard hashing)
+// Phase B universe = admin-curated stocks ∪ admin-curated ETFs ∪
+// FE-observed stocks (redis HASH `fe:observation:stocks:refcnt`).
+// UniverseService normalizes (dedup by symbol — same symbol can appear in
+// both stock and ETF lists with different source flags), applies the
+// shard hash filter, and exposes per-source counts for heartbeat metrics.
+// Each refresh is the authoritative snapshot — no version/leaseId.
 @Injectable()
 export class UniverseService {
   private readonly logger = new Logger(UniverseService.name);
 
-  private current: UniverseLeaseModel | null = null;
+  private currentSymbols: ObservedSymbolModel[] = [];
 
-  constructor(@Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig) {}
+  private adminCount = 0;
 
-  currentSnapshot(): UniverseLeaseModel | null {
-    return this.current;
+  private feCount = 0;
+
+  private bothCount = 0;
+
+  private lastAppliedAt: Date | null = null;
+
+  constructor(@Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig) {}
+
+  // Returns the shard-filtered, normalized observation universe.
+  symbols(): readonly ObservedSymbolModel[] {
+    return this.currentSymbols;
   }
 
-  // Returns true if the snapshot was applied (newer than current).
-  apply(snapshot: UniverseLeaseModel): boolean {
-    if (snapshot.marketEnv !== this.kiwoom.marketEnv) {
-      throw new DomainError(
-        `universe snapshot marketEnv mismatch: got ${snapshot.marketEnv}, worker is ${this.kiwoom.marketEnv}`,
-        'UNIVERSE_MARKET_ENV_MISMATCH',
-        { got: snapshot.marketEnv, expected: this.kiwoom.marketEnv },
-      );
-    }
+  // Convenience for callers that only need raw symbol strings.
+  symbolList(): readonly string[] {
+    return this.currentSymbols.map((s) => s.symbol);
+  }
 
-    if (this.current && snapshot.version <= this.current.version) {
-      this.logger.debug(
-        `snapshot v${snapshot.version} older than current v${this.current.version}, ignoring`,
-      );
+  size(): number {
+    return this.currentSymbols.length;
+  }
 
-      return false;
-    }
+  observedAdminCount(): number {
+    return this.adminCount;
+  }
 
-    const normalized: UniverseLeaseModel = {
-      ...snapshot,
-      symbols: this.normalizeSymbols(snapshot.symbols),
-    };
+  observedFeCount(): number {
+    return this.feCount;
+  }
 
-    this.current = normalized;
+  lastAppliedAtMs(): number | null {
+    return this.lastAppliedAt?.getTime() ?? null;
+  }
 
-    this.logger.log(
-      `universe snapshot applied: leaseId=${snapshot.leaseId} v=${snapshot.version} symbols=${normalized.symbols.length}`,
+  // Replaces the in-memory universe with the union of admin stocks +
+  // admin ETFs + FE-observed symbols. Returns the number of symbols that
+  // actually landed in this worker's shard.
+  apply(
+    adminStocks: readonly ObservedSymbolModel[],
+    adminEtfs: readonly ObservedSymbolModel[],
+    feSymbols: readonly ObservedSymbolModel[],
+  ): number {
+    const merged = this.normalize([...adminStocks, ...adminEtfs, ...feSymbols]);
+
+    const sharded = merged.filter((s) =>
+      shouldHandle(s.symbol, this.runtime.shardIndex, this.runtime.shardCount),
     );
 
-    return true;
+    this.currentSymbols = sharded;
+    this.lastAppliedAt = new Date();
+    this.adminCount = this.countSource(merged, 'ADMIN');
+    this.feCount = this.countSource(merged, 'FE');
+    this.bothCount = this.countSource(merged, 'BOTH');
+
+    this.logger.log(
+      `universe applied: total=${merged.length} sharded=${sharded.length} admin=${this.adminCount} fe=${this.feCount} both=${this.bothCount}`,
+    );
+
+    return sharded.length;
   }
 
-  private normalizeSymbols(
-    symbols: readonly UniverseLeaseModel['symbols'][number][],
-  ): UniverseLeaseModel['symbols'] {
-    const seen = new Map<string, UniverseLeaseModel['symbols'][number]>();
+  private countSource(
+    list: readonly ObservedSymbolModel[],
+    source: ObservedSymbolSource,
+  ): number {
+    return list.reduce((acc, s) => (s.source === source ? acc + 1 : acc), 0);
+  }
 
-    for (const entry of symbols) {
+  // Dedup by symbol. When the same symbol appears with different source
+  // flags we promote to BOTH. Sort deterministically so the downstream
+  // gateway SUB diff is stable across refreshes.
+  private normalize(entries: readonly ObservedSymbolModel[]): ObservedSymbolModel[] {
+    const byKey = new Map<string, ObservedSymbolModel>();
+
+    for (const entry of entries) {
       if (!entry.symbol) continue;
 
-      if (!seen.has(entry.symbol)) seen.set(entry.symbol, entry);
+      const existing = byKey.get(entry.symbol);
+
+      if (!existing) {
+        byKey.set(entry.symbol, entry);
+
+        continue;
+      }
+
+      const promotedSource: ObservedSymbolSource =
+        existing.source === entry.source ? existing.source : 'BOTH';
+
+      byKey.set(entry.symbol, {
+        symbol: entry.symbol,
+        source: promotedSource,
+        instrumentType: existing.instrumentType === 'STOCK' ? 'STOCK' : entry.instrumentType,
+      });
     }
 
-    return Array.from(seen.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+    return Array.from(byKey.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
   }
 }

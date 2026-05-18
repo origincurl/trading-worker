@@ -3,7 +3,7 @@ import { IsEnum } from 'class-validator';
 export enum AdminJobKind {
   UniverseRefresh = 'universe-refresh',
   CandleFlush = 'candle-flush',
-  ChartBackfillPoll = 'chart-backfill-poll',
+  StockListSync = 'stock-list-sync',
   AlertEval = 'alert-eval',
 }
 

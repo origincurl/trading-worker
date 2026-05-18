@@ -28,8 +28,8 @@ export interface MarketCandleClosedPayload {
   readonly cumulativeVolumeFirst: number | null;
   readonly cumulativeVolumeLast: number | null;
   readonly cumulativeVolumeAnomalies: number;
-  // `realtime` ingests came off WS; `backfill` from chart REST (Phase 6.10).
-  // PK upsert in the repo treats realtime as the source of truth — backfill
+  // `realtime` ingests came off WS; `catchup` from chart REST (Phase 6.10).
+  // PK upsert in the repo treats realtime as the source of truth — catchup
   // never overwrites a realtime candle for the same bucket.
-  readonly dataSource: 'realtime' | 'backfill';
+  readonly dataSource: 'realtime' | 'catchup';
 }

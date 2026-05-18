@@ -41,13 +41,13 @@ export function rowToCandlePayload(
     low: row.low,
     close: row.close,
     volume: row.volume,
-    // Backfill rows are aggregated — we don't have per-tick context.
+    // Catchup rows are aggregated — we don't have per-tick context.
     tickCount: 0,
     firstSourceTs: row.bucketStart,
     lastSourceTs: row.bucketEnd,
     cumulativeVolumeFirst: null,
     cumulativeVolumeLast: null,
     cumulativeVolumeAnomalies: 0,
-    dataSource: 'backfill',
+    dataSource: 'catchup',
   };
 }

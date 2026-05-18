@@ -1,0 +1,1 @@
+export const STRATEGY_REPOSITORY = Symbol('STRATEGY_REPOSITORY');

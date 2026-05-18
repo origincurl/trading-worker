@@ -3,7 +3,6 @@ import { IsEnum } from 'class-validator';
 export enum CredentialTarget {
   KiwoomCollector = 'kiwoom-collector',
   KiwoomExecutor = 'kiwoom-executor',
-  BeControlPlane = 'be-control-plane',
 }
 
 export class TestCredentialsRequestDto {

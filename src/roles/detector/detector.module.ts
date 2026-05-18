@@ -1,6 +1,5 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { NotifyModule } from '@external/notify/notify.module';
 import { DETECTOR_STATUS } from '@roles/role-status';
 import { AlertRaisedEntity } from './repository/alert-raised.entity';
@@ -16,7 +15,7 @@ import { EvaluateAlertsUsecase } from './usecase/evaluate-alerts.usecase';
 // flow. ScheduleModule.forRoot() lives in AppModule (single root) so
 // @Interval handlers don't double-fire when multiple role modules load.
 @Module({
-  imports: [NotifyModule, BeControlPlaneModule, TypeOrmModule.forFeature([AlertRaisedEntity])],
+  imports: [NotifyModule, TypeOrmModule.forFeature([AlertRaisedEntity])],
   providers: [
     DetectorStatusService,
     AlertService,

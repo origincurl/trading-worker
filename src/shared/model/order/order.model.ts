@@ -1,0 +1,46 @@
+import { Brokerage } from '@shared/model/account/brokerage.enum';
+import { MarketEnv } from '@shared/model/api-credential/market-env.enum';
+import { OrderMethod } from './order-method.enum';
+import { OrderStatus } from './order-status.enum';
+import { OrderType } from './order-type.enum';
+
+export class OrderModel {
+  id!: number;
+  accountId!: number;
+  decisionId!: number | null;
+  accountStrategyId!: number | null;
+  strategyId!: number | null;
+  stockId!: number;
+  externalOrderId!: string | null;
+  clientOrderId!: string | null;
+  requestedByUserId!: number | null;
+  apiCredentialId!: number | null;
+  brokerage!: Brokerage | null;
+  marketEnv!: MarketEnv | null;
+  accountExternalId!: string | null;
+  brokerOrderId!: string | null;
+  orderType!: OrderType;
+  orderMethod!: OrderMethod;
+  status!: OrderStatus;
+  quantity!: string;
+  filledQuantity!: string;
+  remainingQuantity!: string | null;
+  price!: string | null;
+  averageFillPrice!: string | null;
+  orderAmount!: string | null;
+  filledAmount!: string | null;
+  feeAmount!: string | null;
+  taxAmount!: string | null;
+  isPaper!: boolean;
+  requestedAt!: Date | null;
+  acceptedAt!: Date | null;
+  filledAt!: Date | null;
+  cancelRequestedAt!: Date | null;
+  cancelledAt!: Date | null;
+  failedAt!: Date | null;
+  failureReason!: string | null;
+  rawRequest!: Record<string, unknown> | null;
+  rawResponse!: Record<string, unknown> | null;
+  createdAt!: Date;
+  updatedAt!: Date;
+}

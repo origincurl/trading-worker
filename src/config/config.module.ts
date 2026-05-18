@@ -1,8 +1,9 @@
 import { Global, Module } from '@nestjs/common';
 import { ADMIN_CONFIG, loadAdminConfig } from './admin.config';
-import { BE_CONTROL_PLANE_CONFIG, loadBeControlPlaneConfig } from './be-control-plane.config';
 import { COLLECTOR_CONFIG, loadCollectorConfig } from './collector.config';
+import { TRACKER_CONFIG, loadTrackerConfig } from './tracker.config';
 import { KIWOOM_CONFIG, loadKiwoomConfig } from './kiwoom.config';
+import { NOTIFIER_CONFIG, loadNotifierConfig } from './notifier.config';
 import { NOTIFY_CONFIG, loadNotifyConfig } from './notify.config';
 import { PERSISTENCE_CONFIG, loadPersistenceConfig } from './persistence.config';
 import { REDIS_CONFIG, loadRedisConfig } from './redis.config';
@@ -12,13 +13,24 @@ export function validateEnv(env: NodeJS.ProcessEnv) {
   const runtime = loadRuntimeConfig(env);
   const persistence = loadPersistenceConfig(env);
   const redis = loadRedisConfig(env);
-  const kiwoom = loadKiwoomConfig(env, runtime.roles);
-  const beControlPlane = loadBeControlPlaneConfig(env);
+  const kiwoom = loadKiwoomConfig(env);
   const notify = loadNotifyConfig(env);
   const collector = loadCollectorConfig(env);
+  const tracker = loadTrackerConfig(env);
+  const notifier = loadNotifierConfig(env);
   const admin = loadAdminConfig(env);
 
-  return { runtime, persistence, redis, kiwoom, beControlPlane, notify, collector, admin };
+  return {
+    runtime,
+    persistence,
+    redis,
+    kiwoom,
+    notify,
+    collector,
+    tracker,
+    notifier,
+    admin,
+  };
 }
 
 export type ValidatedConfig = ReturnType<typeof validateEnv>;
@@ -34,9 +46,10 @@ export class ConfigModule {
         { provide: PERSISTENCE_CONFIG, useValue: config.persistence },
         { provide: REDIS_CONFIG, useValue: config.redis },
         { provide: KIWOOM_CONFIG, useValue: config.kiwoom },
-        { provide: BE_CONTROL_PLANE_CONFIG, useValue: config.beControlPlane },
         { provide: NOTIFY_CONFIG, useValue: config.notify },
         { provide: COLLECTOR_CONFIG, useValue: config.collector },
+        { provide: TRACKER_CONFIG, useValue: config.tracker },
+        { provide: NOTIFIER_CONFIG, useValue: config.notifier },
         { provide: ADMIN_CONFIG, useValue: config.admin },
       ],
       exports: [
@@ -44,9 +57,10 @@ export class ConfigModule {
         PERSISTENCE_CONFIG,
         REDIS_CONFIG,
         KIWOOM_CONFIG,
-        BE_CONTROL_PLANE_CONFIG,
         NOTIFY_CONFIG,
         COLLECTOR_CONFIG,
+        TRACKER_CONFIG,
+        NOTIFIER_CONFIG,
         ADMIN_CONFIG,
       ],
     };

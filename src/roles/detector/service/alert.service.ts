@@ -1,15 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ulid } from 'ulid';
 import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
-import {
-  BE_CONTROL_PLANE_CLIENT,
-  type BeControlPlaneClient,
-} from '@external/be-control-plane/client/be-control-plane.client';
 import type {
-  NotifyGateway,
+  NotifyVendor,
   NotifyInput,
   NotifySeverity,
-} from '@external/notify/gateway/notify.gateway';
+} from '@external/notify/vendor/notify.vendor';
 import { NOTIFY_GATEWAY } from '@external/notify/notify.token';
 import { BUS_STREAMS } from '@shared/bus/bus.token';
 import type { BusStreams } from '@shared/bus/bus-streams.interface';
@@ -45,9 +41,8 @@ export class AlertService {
 
   constructor(
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
-    @Inject(NOTIFY_GATEWAY) private readonly notify: NotifyGateway,
+    @Inject(NOTIFY_GATEWAY) private readonly notify: NotifyVendor,
     @Inject(BUS_STREAMS) private readonly streams: BusStreams,
-    @Inject(BE_CONTROL_PLANE_CLIENT) private readonly be: BeControlPlaneClient,
     @Inject(ALERT_REPOSITORY) private readonly repo: AlertRepository,
     private readonly eventFactory: WorkerEventFactory,
   ) {}
@@ -102,15 +97,14 @@ export class AlertService {
       );
     }
 
+    // Phase F: BE audit hook removed — the alert.raised stream event
+    // flows to the notifier which records the audit row in `events`.
     await Promise.all([
       this.dispatchNotify(payload).catch((err) =>
         this.logger.warn(`notify failed: ${err instanceof Error ? err.message : err}`),
       ),
       this.dispatchStreams(payload).catch((err) =>
         this.logger.warn(`streams failed: ${err instanceof Error ? err.message : err}`),
-      ),
-      this.dispatchBeAudit(payload).catch((err) =>
-        this.logger.warn(`BE audit failed: ${err instanceof Error ? err.message : err}`),
       ),
     ]);
   }
@@ -138,17 +132,5 @@ export class AlertService {
     });
 
     await this.streams.produce(ALERT_RAISED_STREAM, event);
-  }
-
-  private async dispatchBeAudit(payload: AlertRaisedPayload): Promise<void> {
-    await this.be.reportAlertRaised({
-      alertId: payload.alertId,
-      category: payload.category,
-      severity: payload.severity,
-      subject: payload.subject,
-      message: payload.message,
-      raisedAt: payload.raisedAt,
-      metadata: payload.metadata,
-    });
   }
 }

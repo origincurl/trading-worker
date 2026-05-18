@@ -1,6 +1,5 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
 import { COLLECTOR_STATUS } from '@roles/role-status';
 import { CandleEntity } from './repository/candle.entity';
@@ -13,34 +12,35 @@ import {
 } from './repository/dead-letter.repository';
 import { CandleBuilderService } from './service/candle-builder.service';
 import { CandleCloseService } from './service/candle-close.service';
+import { ChartCatchupService } from './service/chart-catchup.service';
 import { CollectorStatusService } from './service/collector-status.service';
 import { DeadLetterService } from './service/dead-letter.service';
 import { MarketOrderbookService } from './service/market-orderbook.service';
 import { MarketTickService } from './service/market-tick.service';
 import { SubscriptionPlannerService } from './service/subscription-planner.service';
 import { UniverseService } from './service/universe.service';
+import { ChartCatchupConsumer } from './trigger/consumer/chart-catchup.consumer';
 import { CandleFlushScheduler } from './trigger/scheduler/candle-flush.scheduler';
-import { ChartBackfillScheduler } from './trigger/scheduler/chart-backfill.scheduler';
 import { HeartbeatScheduler } from './trigger/scheduler/heartbeat.scheduler';
+import { StockListSyncScheduler } from './trigger/scheduler/stock-list-sync.scheduler';
 import { UniverseRefreshScheduler } from './trigger/scheduler/universe-refresh.scheduler';
+import { ChartCatchupRequestSubscriber } from './trigger/subscriber/chart-catchup-request.subscriber';
 import { KiwoomTickSubscriber } from './trigger/subscriber/kiwoom-tick.subscriber';
 import { HeartbeatUsecase } from './usecase/heartbeat.usecase';
 import { IngestTickUsecase } from './usecase/ingest-tick.usecase';
-import { ProcessChartBackfillLeaseUsecase } from './usecase/process-chart-backfill-lease.usecase';
+import { ProcessChartCatchupUsecase } from './usecase/process-chart-catchup.usecase';
 import { RefreshUniverseUsecase } from './usecase/refresh-universe.usecase';
+import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
 
 @Module({
-  imports: [
-    BrokerageModule,
-    BeControlPlaneModule,
-    TypeOrmModule.forFeature([CandleEntity, DeadLetterEntity]),
-  ],
+  imports: [BrokerageModule, TypeOrmModule.forFeature([CandleEntity, DeadLetterEntity])],
   providers: [
     CollectorStatusService,
     MarketTickService,
     MarketOrderbookService,
     CandleBuilderService,
     CandleCloseService,
+    ChartCatchupService,
     DeadLetterService,
     UniverseService,
     SubscriptionPlannerService,
@@ -50,13 +50,16 @@ import { RefreshUniverseUsecase } from './usecase/refresh-universe.usecase';
     { provide: DEAD_LETTER_REPOSITORY, useExisting: DeadLetterRepositoryImpl },
     IngestTickUsecase,
     RefreshUniverseUsecase,
-    ProcessChartBackfillLeaseUsecase,
+    SyncStockListUsecase,
+    ProcessChartCatchupUsecase,
     KiwoomTickSubscriber,
+    ChartCatchupRequestSubscriber,
+    ChartCatchupConsumer,
     HeartbeatUsecase,
     HeartbeatScheduler,
     CandleFlushScheduler,
     UniverseRefreshScheduler,
-    ChartBackfillScheduler,
+    StockListSyncScheduler,
     { provide: COLLECTOR_STATUS, useExisting: CollectorStatusService },
   ],
   exports: [COLLECTOR_STATUS],

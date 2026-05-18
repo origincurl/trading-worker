@@ -1,4 +1,5 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
+import type { HeartbeatMetrics } from '@shared/cache/heartbeat.writer';
 import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
 import { KiwoomTickSubscriber } from '@roles/collector/trigger/subscriber/kiwoom-tick.subscriber';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
@@ -25,6 +26,19 @@ export class CollectorStatusService implements RoleStatusProvider {
     private readonly ingestUsecase: IngestTickUsecase,
   ) {}
 
+  // Phase 9 heartbeat surface: the metrics block written to redis under
+  // the worker heartbeat key. BE admin reads these to render fleet state
+  // (per-source observation counts, current subscription depth) without
+  // having to scrape logs.
+  getMetrics(): HeartbeatMetrics {
+    return {
+      universe_size: this.universe.size(),
+      observed_admin_count: this.universe.observedAdminCount(),
+      observed_fe_count: this.universe.observedFeCount(),
+      active_subscriptions: this.subscriber.subscribedSymbols().length,
+    };
+  }
+
   getStatus(): RoleStatus {
     const subscribed = this.subscriber.subscribedSymbols().length;
     const last = this.tickService.lastTickAt();
@@ -32,7 +46,9 @@ export class CollectorStatusService implements RoleStatusProvider {
     const lastClose = this.candleClose.lastClosedAt();
     const stats = this.ingestUsecase.snapshotStats();
     const openBuckets = this.candleBuilder.openBuckets().length;
-    const snap = this.universe.currentSnapshot();
+    const universeSize = this.universe.size();
+    const adminCount = this.universe.observedAdminCount();
+    const feCount = this.universe.observedFeCount();
     const lastRefresh = this.refreshUniverse.lastRefreshAt();
 
     const rejections = Array.from(this.candleBuilder.rejectionCounts())
@@ -46,7 +62,7 @@ export class CollectorStatusService implements RoleStatusProvider {
       `rejections=[${rejections}] ` +
       `lastTickAt=${last?.toISOString() ?? 'never'} lastObAt=${lastOb?.toISOString() ?? 'never'} ` +
       `lastCloseAt=${lastClose?.toISOString() ?? 'never'} ` +
-      `universeV=${snap?.version ?? 'none'} universeSymbols=${snap?.symbols.length ?? 0} ` +
+      `universeSize=${universeSize} observedAdmin=${adminCount} observedFe=${feCount} ` +
       `universeRefreshOk=${this.refreshUniverse.lastRefreshOk()} ` +
       `lastUniverseRefreshAt=${lastRefresh?.toISOString() ?? 'never'} ` +
       `wsConnected=${this.subscriber.isConnected()} uptime=${Math.floor((Date.now() - this.bootedAt) / 1000)}s`;

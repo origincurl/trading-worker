@@ -1,6 +1,5 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { CALCULATOR_STATUS } from '@roles/role-status';
 import { IndicatorEntity } from './repository/indicator.entity';
 import { INDICATOR_REPOSITORY, IndicatorRepositoryImpl } from './repository/indicator.repository';
@@ -13,7 +12,7 @@ import { ProcessClosedCandleUsecase } from './usecase/process-closed-candle.usec
 // BrokerageModule — eslint forbids @external/brokerage/* imports in
 // calculator files at compile time; the module structure mirrors that.
 @Module({
-  imports: [BeControlPlaneModule, TypeOrmModule.forFeature([IndicatorEntity])],
+  imports: [TypeOrmModule.forFeature([IndicatorEntity])],
   providers: [
     CalculatorStatusService,
     IndicatorService,

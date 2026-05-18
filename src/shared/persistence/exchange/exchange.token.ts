@@ -1,0 +1,1 @@
+export const EXCHANGE_REPOSITORY = Symbol('EXCHANGE_REPOSITORY');

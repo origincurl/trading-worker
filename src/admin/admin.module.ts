@@ -1,5 +1,4 @@
 import { Module } from '@nestjs/common';
-import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { AdminCredentialsController } from './controller/admin-credentials.controller';
 import { AdminInfoController } from './controller/admin-info.controller';
 import { AdminJobsController } from './controller/admin-jobs.controller';
@@ -18,7 +17,6 @@ import { TriggerWsReconnectUsecase } from './usecase/trigger-ws-reconnect.usecas
 // gracefully when the role-specific dependency they want to trigger is
 // absent (see trigger-admin-job.usecase.ts).
 @Module({
-  imports: [BeControlPlaneModule],
   controllers: [
     AdminInfoController,
     AdminCredentialsController,

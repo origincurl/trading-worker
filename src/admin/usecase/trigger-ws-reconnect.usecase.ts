@@ -1,10 +1,10 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { RUNTIME_CONFIG, type RuntimeConfig, type WorkerRole } from '@config/runtime.config';
 import {
-  COLLECTOR_BROKERAGE_GATEWAY,
-  EXECUTOR_BROKERAGE_GATEWAY,
+  COLLECTOR_BROKERAGE_VENDOR,
+  EXECUTOR_BROKERAGE_VENDOR,
 } from '@external/brokerage/brokerage.token';
-import type { BrokerageGateway } from '@external/brokerage/gateway/brokerage.gateway';
+import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
 import {
   WsReconnectProfile,
   type WsReconnectRequestDto,
@@ -27,8 +27,8 @@ export class TriggerWsReconnectUsecase {
 
   constructor(
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
-    @Optional() @Inject(COLLECTOR_BROKERAGE_GATEWAY) private readonly collector?: BrokerageGateway,
-    @Optional() @Inject(EXECUTOR_BROKERAGE_GATEWAY) private readonly executor?: BrokerageGateway,
+    @Optional() @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly collector?: BrokerageVendor,
+    @Optional() @Inject(EXECUTOR_BROKERAGE_VENDOR) private readonly executor?: BrokerageVendor,
   ) {}
 
   async execute(input: WsReconnectRequestDto): Promise<WsReconnectResponseDto> {

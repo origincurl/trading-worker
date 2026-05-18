@@ -3,7 +3,7 @@
 // executor's rate budget (architecture.md §10). The boot-time check in
 // kiwoom.config.ts guarantees the keys differ; this DI split guarantees
 // the rate limiter / api client instances differ.
-export const COLLECTOR_BROKERAGE_GATEWAY = Symbol('COLLECTOR_BROKERAGE_GATEWAY');
-export const EXECUTOR_BROKERAGE_GATEWAY = Symbol('EXECUTOR_BROKERAGE_GATEWAY');
+export const COLLECTOR_BROKERAGE_VENDOR = Symbol('COLLECTOR_BROKERAGE_VENDOR');
+export const EXECUTOR_BROKERAGE_VENDOR = Symbol('EXECUTOR_BROKERAGE_VENDOR');
 
-export type BrokerageGatewayProfile = 'collector' | 'executor';
+export type BrokerageVendorProfile = 'collector' | 'executor';

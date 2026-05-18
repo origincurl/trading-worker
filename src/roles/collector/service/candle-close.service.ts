@@ -36,7 +36,7 @@ export class CandleCloseService {
     return this._lastClosedAt;
   }
 
-  async close(candle: CandleModel, dataSource: 'realtime' | 'backfill'): Promise<void> {
+  async close(candle: CandleModel, dataSource: 'realtime' | 'catchup'): Promise<void> {
     const payload: MarketCandleClosedPayload = {
       provider: 'kiwoom',
       marketEnv: candle.marketEnv,

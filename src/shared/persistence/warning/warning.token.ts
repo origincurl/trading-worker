@@ -1,0 +1,1 @@
+export const WARNING_REPOSITORY = Symbol('WARNING_REPOSITORY');

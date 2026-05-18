@@ -8,11 +8,11 @@ import {
 import { COLLECTOR_CONFIG, type CollectorConfig } from '@config/collector.config';
 import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
 import { shouldHandle } from '@common/util/shard';
-import { COLLECTOR_BROKERAGE_GATEWAY } from '@external/brokerage/brokerage.token';
+import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type {
-  BrokerageGateway,
+  BrokerageVendor,
   MarketDataFrameKind,
-} from '@external/brokerage/gateway/brokerage.gateway';
+} from '@external/brokerage/vendor/brokerage.vendor';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
 
@@ -31,7 +31,7 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
   private _subscribedSymbols: readonly string[] = [];
 
   constructor(
-    @Inject(COLLECTOR_BROKERAGE_GATEWAY) private readonly gateway: BrokerageGateway,
+    @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(COLLECTOR_CONFIG) private readonly config: CollectorConfig,
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
     private readonly usecase: IngestTickUsecase,

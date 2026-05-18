@@ -1,25 +1,29 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
-import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
-import { shouldHandle } from '@common/util/shard';
-import {
-  BE_CONTROL_PLANE_CLIENT,
-  type BeControlPlaneClient,
-} from '@external/be-control-plane/client/be-control-plane.client';
-import { COLLECTOR_BROKERAGE_GATEWAY } from '@external/brokerage/brokerage.token';
-import type {
-  BrokerageGateway,
-  MarketDataFrameKind,
-} from '@external/brokerage/gateway/brokerage.gateway';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { COLLECTOR_CONFIG, type CollectorConfig } from '@config/collector.config';
-import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
+import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
+import type {
+  BrokerageVendor,
+  MarketDataFrameKind,
+} from '@external/brokerage/vendor/brokerage.vendor';
+import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
+import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
+import { ETF_REPOSITORY } from '@shared/persistence/etf/etf.token';
+import type { EtfRepository } from '@shared/persistence/etf/etf.repository';
+import { STOCK_REPOSITORY } from '@shared/persistence/stock/stock.token';
+import type { StockRepository } from '@shared/persistence/stock/stock.repository';
 import { UniverseService } from '@roles/collector/service/universe.service';
+import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
 
-// Pulls a fresh universe lease from BE, applies it via UniverseService,
-// then asks the planner to compute REG/REMOVE diff against currently
-// subscribed symbols on the WS gateway. Tolerates BE failures (logs +
-// keeps current universe) so vendor outage on BE never tears down the
-// vendor WS pipe.
+// FE-observation refcnt HASH key. BE WS gateway maintains it (HINCRBY on
+// subscribe / HDEL on count→0). Worker reads HKEYS — values are
+// reference counts, not used here.
+const FE_OBSERVATION_HASH = 'fe:observation:stocks:refcnt';
+
+// Pulls the combined observation universe from DB (admin-observed stocks
+// + ETFs) and Redis (FE-observed) and re-applies it to the in-memory
+// UniverseService. Failure on any fetch is tolerated — we keep the
+// previous snapshot so a transient DB/Redis hiccup never tears down
+// vendor WS subscriptions.
 @Injectable()
 export class RefreshUniverseUsecase {
   private readonly logger = new Logger(RefreshUniverseUsecase.name);
@@ -29,14 +33,20 @@ export class RefreshUniverseUsecase {
   private _lastRefreshOk = false;
 
   constructor(
-    @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
-    @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
     @Inject(COLLECTOR_CONFIG) private readonly collectorConfig: CollectorConfig,
-    @Inject(BE_CONTROL_PLANE_CLIENT) private readonly be: BeControlPlaneClient,
-    @Inject(COLLECTOR_BROKERAGE_GATEWAY) private readonly gateway: BrokerageGateway,
+    @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
+    @Inject(STOCK_REPOSITORY) private readonly stockRepo: StockRepository,
+    @Inject(ETF_REPOSITORY) private readonly etfRepo: EtfRepository,
+    @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
     private readonly universe: UniverseService,
     private readonly planner: SubscriptionPlannerService,
-  ) {}
+  ) {
+    // SubscriptionPlannerService is intentionally injected even though
+    // the refresh path currently re-subscribes the full target set —
+    // hardening will swap the gateway's bulk REG for a planner diff
+    // once the gateway exposes its current sub set.
+    void this.planner;
+  }
 
   lastRefreshAt(): Date | null {
     return this._lastRefreshAt;
@@ -49,35 +59,52 @@ export class RefreshUniverseUsecase {
   async execute(): Promise<void> {
     this._lastRefreshAt = new Date();
 
-    const knownVersion = this.universe.currentSnapshot()?.version;
+    let adminStocks: ObservedSymbolModel[];
+    let adminEtfs: ObservedSymbolModel[];
+    let feSymbols: ObservedSymbolModel[];
 
-    const result = await this.be.fetchUniverseLease({
-      marketEnv: this.kiwoom.marketEnv,
-      knownVersion,
-    });
+    try {
+      const [stockRows, etfRows, feKeys] = await Promise.all([
+        this.stockRepo.findObservedStocks(),
+        this.etfRepo.findObservedEtfs(),
+        this.readFeObservedSymbols(),
+      ]);
 
-    if (result.kind !== 'success') {
+      adminStocks = stockRows.map((s) => ({
+        symbol: s.symbol,
+        source: 'ADMIN' as const,
+        instrumentType: 'STOCK' as const,
+      }));
+
+      adminEtfs = etfRows.map((e) => ({
+        symbol: e.symbol,
+        source: 'ADMIN' as const,
+        instrumentType: 'ETF' as const,
+      }));
+
+      feSymbols = feKeys.map((symbol) => ({
+        symbol,
+        source: 'FE' as const,
+        instrumentType: 'STOCK' as const,
+      }));
+    } catch (err) {
       this._lastRefreshOk = false;
 
-      this.logger.warn(`universe lease fetch failed: kind=${result.kind}`);
+      this.logger.warn(
+        `observed-symbols fetch failed: ${err instanceof Error ? err.message : err}`,
+      );
 
       return;
     }
 
-    const applied = this.universe.apply(result.data);
+    this.universe.apply(adminStocks, adminEtfs, feSymbols);
 
     this._lastRefreshOk = true;
 
-    if (!applied) return;
-
-    // Snapshot changed — diff against gateway's current view, REG/REMOVE.
-    const target = this.universe
-      .currentSnapshot()!
-      .symbols.map((s) => s.symbol)
-      .filter((s) => shouldHandle(s, this.runtime.shardIndex, this.runtime.shardCount));
+    const target = this.universe.symbolList();
 
     if (!this.gateway.isMarketDataStreamConnected()) {
-      this.logger.warn('gateway not connected — applying universe diff deferred');
+      this.logger.warn('gateway not connected — universe REG deferred');
 
       return;
     }
@@ -86,15 +113,28 @@ export class RefreshUniverseUsecase {
 
     if (this.collectorConfig.subscribeOrderbook) kinds.push('orderbook');
 
-    // Gateway tracks current subscriptions internally; planner needs to
-    // know them. Without an exposed accessor we approximate by treating
-    // each refresh as "subscribe the full target" — Kiwoom REG with
-    // refresh=1 is idempotent. REMOVE for symbols not in target requires
-    // the gateway to expose its set, which is a Phase 6.8 hardening.
     if (target.length > 0) {
-      await this.gateway.subscribeMarketData({ symbols: target, kinds });
+      await this.gateway.subscribeMarketData({ symbols: [...target], kinds });
 
-      this.logger.log(`universe applied: REG symbols=${target.length} kinds=[${kinds.join(',')}]`);
+      this.logger.log(`universe REG symbols=${target.length} kinds=[${kinds.join(',')}]`);
+    }
+  }
+
+  private async readFeObservedSymbols(): Promise<string[]> {
+    if (!this.redis) return [];
+
+    try {
+      // HKEYS returns the symbol set. Refcnt values themselves are not
+      // needed — BE GC removes the key once count→0.
+      const keys = await this.redis.hkeys(FE_OBSERVATION_HASH);
+
+      return Array.isArray(keys) ? keys : [];
+    } catch (err) {
+      this.logger.warn(
+        `redis hkeys ${FE_OBSERVATION_HASH} failed: ${err instanceof Error ? err.message : err}`,
+      );
+
+      return [];
     }
   }
 }

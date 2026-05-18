@@ -2,9 +2,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { ulid } from 'ulid';
 import {
-  ORDER_REPOSITORY,
-  type OrderRepository,
-} from '@roles/executor/repository/order.repository';
+  ORDER_ATTEMPT_REPOSITORY,
+  type OrderAttemptRepository,
+} from '@shared/persistence/order/order-attempt.repository';
 import type { OrderIntentSide, OrderIntentType } from '@shared/event/signal-detected.event';
 
 export interface PrepareAttemptInput {
@@ -31,7 +31,7 @@ export interface PrepareAttemptResult {
 export class ExecutorOrderService {
   constructor(
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
-    @Inject(ORDER_REPOSITORY) private readonly repo: OrderRepository,
+    @Inject(ORDER_ATTEMPT_REPOSITORY) private readonly repo: OrderAttemptRepository,
   ) {}
 
   async prepareAttempt(input: PrepareAttemptInput): Promise<PrepareAttemptResult> {

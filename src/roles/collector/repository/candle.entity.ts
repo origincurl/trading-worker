@@ -62,5 +62,5 @@ export class CandleEntity extends BaseEntity {
   cumVolAnomalies!: number;
 
   @Column({ name: 'data_source', type: 'varchar', length: 16 })
-  dataSource!: 'realtime' | 'backfill';
+  dataSource!: 'realtime' | 'catchup';
 }

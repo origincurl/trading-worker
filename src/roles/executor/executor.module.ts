@@ -1,36 +1,37 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { BeControlPlaneModule } from '@external/be-control-plane/be-control-plane.module';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
 import { EXECUTOR_STATUS } from '@roles/role-status';
-import { OrderAttemptEntity } from './repository/order-attempt.entity';
-import { OrderFillEntity } from './repository/order-fill.entity';
-import { ORDER_REPOSITORY, OrderRepositoryImpl } from './repository/order.repository';
+import { OrderAttemptEntity } from '@shared/persistence/order/order-attempt.entity';
+import {
+  ORDER_ATTEMPT_REPOSITORY,
+  OrderAttemptRepositoryImpl,
+} from '@shared/persistence/order/order-attempt.repository';
 import { ExecutorOrderService } from './service/executor-order.service';
 import { ExecutorStatusService } from './service/executor-status.service';
 import { SignalDetectedConsumer } from './trigger/consumer/signal-detected.consumer';
-import { KiwoomExecutionSubscriber } from './trigger/subscriber/kiwoom-execution.subscriber';
-import { IngestOrderFillUsecase } from './usecase/ingest-order-fill.usecase';
+import { OrderPickupScheduler } from './trigger/scheduler/order-pickup.scheduler';
+import { PickupCancellingOrdersUsecase } from './usecase/pickup-cancelling-orders.usecase';
+import { PickupRequestedOrdersUsecase } from './usecase/pickup-requested-orders.usecase';
 import { PlaceOrderUsecase } from './usecase/place-order.usecase';
 
-// Vendor-dependent role. Uses EXECUTOR_BROKERAGE_GATEWAY token — distinct
+// Vendor-dependent role. Uses EXECUTOR_BROKERAGE_VENDOR token — distinct
 // credentials from collector to keep the order rate-limit budget unshared
-// (architecture.md §10).
+// (architecture.md §10). Execution-stream ingest moved to tracker per
+// phase/06-worker-tracker.md §3: executor only places orders / records
+// attempts; fills are owned by tracker.
 @Module({
-  imports: [
-    BrokerageModule,
-    BeControlPlaneModule,
-    TypeOrmModule.forFeature([OrderAttemptEntity, OrderFillEntity]),
-  ],
+  imports: [BrokerageModule, TypeOrmModule.forFeature([OrderAttemptEntity])],
   providers: [
     ExecutorStatusService,
     ExecutorOrderService,
-    OrderRepositoryImpl,
-    { provide: ORDER_REPOSITORY, useExisting: OrderRepositoryImpl },
+    OrderAttemptRepositoryImpl,
+    { provide: ORDER_ATTEMPT_REPOSITORY, useExisting: OrderAttemptRepositoryImpl },
     PlaceOrderUsecase,
-    IngestOrderFillUsecase,
+    PickupRequestedOrdersUsecase,
+    PickupCancellingOrdersUsecase,
+    OrderPickupScheduler,
     SignalDetectedConsumer,
-    KiwoomExecutionSubscriber,
     { provide: EXECUTOR_STATUS, useExisting: ExecutorStatusService },
   ],
   exports: [EXECUTOR_STATUS],

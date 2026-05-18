@@ -1,7 +1,14 @@
 import { Logger } from '@nestjs/common';
-import { IntegrationError } from '@common/error/domain.error';
+import { DomainError, IntegrationError } from '@common/error/domain.error';
+import { redactPotentialSecrets } from '@common/util/redact.util';
 import type { BrokerageVendorProfile } from '../../brokerage.token';
 import type { RateLimiter } from '../../service/rate-limiter.service';
+import type {
+  CredentialUsageContext,
+  CredentialUsageService,
+} from '../../credential/credential-usage.service';
+
+const DEFAULT_REST_TIMEOUT_MS = 20_000;
 
 // Token supplier resolves the bearer access token for THIS call. Collector
 // profile binds a lambda that asks CredentialSourceService for the next
@@ -9,13 +16,21 @@ import type { RateLimiter } from '../../service/rate-limiter.service';
 // profile binds a lambda that captures the accountId and asks for the
 // account-scoped credential. Either way the api-client just calls
 // `tokenSupplier()` — it never sees the appKey/appSecret material.
-export type KiwoomTokenSupplier = () => Promise<string>;
+export type KiwoomTokenResult =
+  | string
+  | {
+      readonly token: string;
+      readonly credential: CredentialUsageContext;
+    };
+
+export type KiwoomTokenSupplier = () => Promise<KiwoomTokenResult>;
 
 export interface KiwoomApiClientOptions {
   readonly profile: BrokerageVendorProfile;
   readonly restUrl?: string;
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly rateLimiter: RateLimiter;
+  readonly usage?: CredentialUsageService;
 }
 
 export interface KiwoomRequestOptions<TRequest> {
@@ -29,6 +44,7 @@ export interface KiwoomRequestOptions<TRequest> {
   readonly body: TRequest;
   readonly contYn?: 'Y' | 'N';
   readonly nextKey?: string;
+  readonly tokenSupplier?: KiwoomTokenSupplier;
 }
 
 // Single entry for all REST calls — concentrates rate-limit + auth in one place.
@@ -37,6 +53,8 @@ export interface KiwoomRequestOptions<TRequest> {
 // isolated.
 export class KiwoomApiClient {
   private readonly logger: Logger;
+
+  private warnedMissingCredentialContext = false;
 
   constructor(private readonly opts: KiwoomApiClientOptions) {
     this.logger = new Logger(`KiwoomApiClient[${opts.profile}]`);
@@ -49,7 +67,7 @@ export class KiwoomApiClient {
   async request<TRequest, TResponse>(
     options: KiwoomRequestOptions<TRequest>,
   ): Promise<TResponse> {
-    const { apiId, endpointPath, body, contYn, nextKey } = options;
+    const { apiId, endpointPath, body, contYn, nextKey, tokenSupplier } = options;
 
     if (!this.opts.restUrl) {
       throw new IntegrationError('Kiwoom REST URL not configured', {
@@ -62,91 +80,157 @@ export class KiwoomApiClient {
     const path = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
     const url = `${restUrl}${path}`;
 
-    return this.opts.rateLimiter.run(async () => {
-      const token = await this.opts.tokenSupplier();
+    const tokenResult = normalizeTokenResult(await (tokenSupplier ?? this.opts.tokenSupplier)());
 
+    return this.opts.rateLimiter.run(async () => {
       let response: Response;
 
-      try {
-        response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json;charset=UTF-8',
-            authorization: `Bearer ${token}`,
-            'api-id': apiId,
-            'cont-yn': contYn ?? 'N',
-            'next-key': nextKey ?? '',
-          },
-          body: JSON.stringify(body ?? {}),
-        });
-      } catch (err) {
-        throw new IntegrationError(
-          `Kiwoom REST network error apiId=${apiId}: ${err instanceof Error ? err.message : String(err)}`,
-          { profile: this.opts.profile, apiId, endpointPath },
-        );
-      }
+      const request = async (): Promise<TResponse> => {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), DEFAULT_REST_TIMEOUT_MS);
 
-      let parsed: unknown;
-      const rawText = await response.text();
-
-      if (rawText) {
         try {
-          parsed = JSON.parse(rawText);
+          response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json;charset=UTF-8',
+              authorization: `Bearer ${tokenResult.token}`,
+              'api-id': apiId,
+              'cont-yn': contYn ?? 'N',
+              'next-key': nextKey ?? '',
+            },
+            body: JSON.stringify(body ?? {}),
+            signal: controller.signal,
+          });
         } catch (err) {
+          if (controller.signal.aborted) {
+            throw new IntegrationError(`Kiwoom REST timeout apiId=${apiId}`, {
+              profile: this.opts.profile,
+              apiId,
+              endpointPath,
+              timeoutMs: DEFAULT_REST_TIMEOUT_MS,
+            });
+          }
+
+          throw err;
+        } finally {
+          clearTimeout(timeout);
+        }
+
+        let parsed: unknown;
+        const rawText = await response.text();
+
+        if (rawText) {
+          try {
+            parsed = JSON.parse(rawText);
+          } catch (err) {
+            throw new IntegrationError(
+              `Kiwoom REST non-JSON response apiId=${apiId} status=${response.status}`,
+              {
+                profile: this.opts.profile,
+                apiId,
+                endpointPath,
+                status: response.status,
+                parseError: err instanceof Error ? err.message : String(err),
+              },
+            );
+          }
+        } else {
+          parsed = {};
+        }
+
+        if (!response.ok) {
+          const { returnCode, returnMsg } = extractReturnFields(parsed);
+
           throw new IntegrationError(
-            `Kiwoom REST non-JSON response apiId=${apiId} status=${response.status}`,
+              `Kiwoom REST HTTP ${response.status} apiId=${apiId} returnCode=${String(returnCode ?? '')} returnMsg=${redactPotentialSecrets(returnMsg) ?? ''}`,
             {
               profile: this.opts.profile,
               apiId,
               endpointPath,
               status: response.status,
-              parseError: err instanceof Error ? err.message : String(err),
+              returnCode,
+              returnMsg: redactPotentialSecrets(returnMsg),
             },
           );
         }
-      } else {
-        parsed = {};
-      }
 
-      if (!response.ok) {
         const { returnCode, returnMsg } = extractReturnFields(parsed);
 
+        // Kiwoom REST convention: 200 OK + return_code=0 means success.
+        // Anything else is a vendor-level rejection that we surface as
+        // IntegrationError so callers can map to OrderStatus.Rejected etc.
+        if (
+          returnCode !== undefined &&
+          returnCode !== null &&
+          returnCode !== 0 &&
+          returnCode !== '0'
+        ) {
+          throw new IntegrationError(
+            `Kiwoom REST returned non-zero return_code apiId=${apiId} returnCode=${String(returnCode)} returnMsg=${redactPotentialSecrets(returnMsg) ?? ''}`,
+            {
+              profile: this.opts.profile,
+              apiId,
+              endpointPath,
+              returnCode,
+              returnMsg: redactPotentialSecrets(returnMsg),
+            },
+          );
+        }
+
+        this.logger.debug(`apiId=${apiId} path=${path} status=${response.status} ok`);
+
+        return parsed as TResponse;
+      };
+
+      try {
+        if (tokenResult.credential && this.opts.usage) {
+          return await this.opts.usage.runRest(
+            this.opts.profile,
+            tokenResult.credential,
+            endpointLabel(endpointPath),
+            request,
+          );
+        }
+
+        if (!tokenResult.credential && this.opts.usage && !this.warnedMissingCredentialContext) {
+          this.warnedMissingCredentialContext = true;
+          this.logger.warn(
+            `Kiwoom REST usage tracking skipped because token supplier returned no credential context apiId=${apiId} path=${path}`,
+          );
+        }
+
+        return await request();
+      } catch (err) {
+        if (err instanceof DomainError) throw err;
+
         throw new IntegrationError(
-          `Kiwoom REST HTTP ${response.status} apiId=${apiId} returnCode=${String(returnCode ?? '')} returnMsg=${returnMsg ?? ''}`,
-          {
-            profile: this.opts.profile,
-            apiId,
-            endpointPath,
-            status: response.status,
-            returnCode,
-            returnMsg,
-          },
+          `Kiwoom REST network error apiId=${apiId}: ${err instanceof Error ? err.message : String(err)}`,
+          { profile: this.opts.profile, apiId, endpointPath },
         );
       }
-
-      const { returnCode, returnMsg } = extractReturnFields(parsed);
-
-      // Kiwoom REST convention: 200 OK + return_code=0 means success.
-      // Anything else is a vendor-level rejection that we surface as
-      // IntegrationError so callers can map to OrderStatus.Rejected etc.
-      if (returnCode !== undefined && returnCode !== null && returnCode !== 0 && returnCode !== '0') {
-        throw new IntegrationError(
-          `Kiwoom REST returned non-zero return_code apiId=${apiId} returnCode=${String(returnCode)} returnMsg=${returnMsg ?? ''}`,
-          {
-            profile: this.opts.profile,
-            apiId,
-            endpointPath,
-            returnCode,
-            returnMsg,
-          },
-        );
-      }
-
-      this.logger.debug(`apiId=${apiId} path=${path} status=${response.status} ok`);
-
-      return parsed as TResponse;
     });
   }
+}
+
+export function normalizeTokenResult(value: KiwoomTokenResult): {
+  readonly token: string;
+  readonly credential: CredentialUsageContext | null;
+} {
+  if (typeof value === 'string') {
+    return { token: value, credential: null };
+  }
+
+  return { token: value.token, credential: value.credential };
+}
+
+function endpointLabel(endpointPath: string): string {
+  if (endpointPath.includes('/ordr')) return 'REST_ORDER';
+  if (endpointPath.includes('/acnt')) return 'REST_ACCOUNT';
+  if (endpointPath.includes('/chart')) return 'REST_CHART';
+  if (endpointPath.includes('/mrkcond')) return 'REST_MARKET_STATS';
+
+  return endpointPath;
 }
 
 function extractReturnFields(parsed: unknown): {

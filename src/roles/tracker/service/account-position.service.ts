@@ -51,7 +51,7 @@ export class AccountPositionService {
 
   async syncOne(target: TrackerAccountTarget): Promise<TrackerPositionModel[] | null> {
     try {
-      const vendorPositions = await this.gateway.getPositions({
+      const vendorPositions = await this.gateway.getPositionsForAccount(target.accountId, {
         accountId: target.accountExternalId,
       });
 

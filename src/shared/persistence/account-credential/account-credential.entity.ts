@@ -12,7 +12,7 @@ import { AccountCredentialModel } from '@shared/model/account/account-credential
 
 // Phase 5 cleanup mirrored from BE: legacy plaintext columns removed; all
 // secret material is on api_credentials referenced by apiCredentialId.
-@Index('IDX_account_credential_account_id', ['accountId'])
+@Index('uq_account_credentials_account', ['accountId'], { unique: true })
 @Index('ix_account_credentials_api_credential_id', ['apiCredentialId'])
 @Entity('account_credentials')
 export class AccountCredentialEntity {

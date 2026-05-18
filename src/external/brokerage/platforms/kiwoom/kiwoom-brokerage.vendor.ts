@@ -40,8 +40,17 @@ import type {
 } from './contract/response/get-stock-master-list.response';
 import type { ModifyOrderResponseContract } from './contract/response/modify-order.response';
 import type { PlaceOrderResponseContract } from './contract/response/place-order.response';
-import type { KiwoomApiClient, KiwoomTokenSupplier } from './kiwoom.api-client';
+import {
+  normalizeTokenResult,
+  type KiwoomApiClient,
+  type KiwoomTokenResult,
+  type KiwoomTokenSupplier,
+} from './kiwoom.api-client';
 import type { KiwoomWsClient } from './kiwoom-ws.client';
+import type {
+  CredentialUsageContext,
+  CredentialUsageService,
+} from '../../credential/credential-usage.service';
 
 export interface KiwoomBrokerageVendorOptions {
   readonly profile: BrokerageVendorProfile;
@@ -51,6 +60,8 @@ export interface KiwoomBrokerageVendorOptions {
   // admin credential probe can exercise the live /oauth2/token path
   // without needing a back-reference into the token service singleton.
   readonly tokenSupplier: KiwoomTokenSupplier;
+  readonly accountTokenSupplier?: (accountId: number) => Promise<KiwoomTokenResult>;
+  readonly usage?: CredentialUsageService;
   // Used by AccessTokenCacheService.invalidate when LOGIN keeps failing.
   // The supplier closure captures the credentialId — we surface a hook
   // here so the gateway can drop a cached token on auth rejection.
@@ -114,6 +125,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   private reconnecting = false;
 
+  private activeWsCredential: CredentialUsageContext | null = null;
+
   constructor(private readonly opts: KiwoomBrokerageVendorOptions) {
     this.logger = new Logger(`KiwoomBrokerageVendor[${opts.profile}]`);
   }
@@ -123,14 +136,36 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   }
 
   async probeAccessToken(): Promise<string> {
-    return this.opts.tokenSupplier();
+    return normalizeTokenResult(await this.opts.tokenSupplier()).token;
   }
 
-  // Account-balance / positions are called from collector AND tracker
-  // paths post-Phase 8 — drop the strict collector profile guard. Either
-  // profile may call. (Rate-limit isolation still holds because each
-  // profile has its own apiClient + bucket.)
+  async probeAccessTokenForAccount(accountId: number): Promise<string> {
+    return normalizeTokenResult(await this.accountTokenSupplier(accountId)()).token;
+  }
+
   async getAccountBalance(input: GetAccountBalanceInput): Promise<AccountBalanceModel> {
+    this.assertProfile('executor', 'getAccountBalance');
+
+    throw new DomainError(
+      'getAccountBalance requires an account-scoped executor credential; use getAccountBalanceForAccount',
+      'ACCOUNT_SCOPED_CREDENTIAL_REQUIRED',
+      { accountExternalId: input.accountId },
+    );
+  }
+
+  async getAccountBalanceForAccount(
+    accountId: number,
+    input: GetAccountBalanceInput,
+  ): Promise<AccountBalanceModel> {
+    this.assertProfile('executor', 'getAccountBalanceForAccount');
+
+    return this.executeGetAccountBalance(input, this.accountTokenSupplier(accountId));
+  }
+
+  private async executeGetAccountBalance(
+    input: GetAccountBalanceInput,
+    tokenSupplier?: KiwoomTokenSupplier,
+  ): Promise<AccountBalanceModel> {
     try {
       const body: GetAccountBalanceRequestContract = { acntNo: input.accountId };
 
@@ -141,6 +176,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId: APIID_ACCOUNT_BALANCE,
         endpointPath: PATH_ACCOUNT,
         body,
+        tokenSupplier,
       });
 
       return {
@@ -157,6 +193,28 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   }
 
   async getPositions(input: GetPositionsInput): Promise<PositionModel[]> {
+    this.assertProfile('executor', 'getPositions');
+
+    throw new DomainError(
+      'getPositions requires an account-scoped executor credential; use getPositionsForAccount',
+      'ACCOUNT_SCOPED_CREDENTIAL_REQUIRED',
+      { accountExternalId: input.accountId },
+    );
+  }
+
+  async getPositionsForAccount(
+    accountId: number,
+    input: GetPositionsInput,
+  ): Promise<PositionModel[]> {
+    this.assertProfile('executor', 'getPositionsForAccount');
+
+    return this.executeGetPositions(input, this.accountTokenSupplier(accountId));
+  }
+
+  private async executeGetPositions(
+    input: GetPositionsInput,
+    tokenSupplier?: KiwoomTokenSupplier,
+  ): Promise<PositionModel[]> {
     try {
       const body: GetPositionsRequestContract = { acntNo: input.accountId };
 
@@ -167,6 +225,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId: APIID_POSITIONS,
         endpointPath: PATH_ACCOUNT,
         body,
+        tokenSupplier,
       });
 
       const snapshotAt = new Date().toISOString();
@@ -188,8 +247,11 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   async placeOrder(input: PlaceOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'placeOrder');
 
-    // `input.accountId` is the accountExternalId (string) — see PlaceOrderInput.
-    return this.executePlaceOrder(input);
+    throw new DomainError(
+      'placeOrder requires an account-scoped executor credential; use placeOrderForAccount',
+      'ACCOUNT_SCOPED_CREDENTIAL_REQUIRED',
+      { accountExternalId: input.accountId },
+    );
   }
 
   async placeOrderForAccount(
@@ -205,16 +267,17 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     // executor credential via the per-call token supplier closure
     // configured in brokerage.module.ts — that resolution already happened
     // by the time the supplier returns a token to KiwoomApiClient.
-    void accountId;
-
-    return this.executePlaceOrder(input);
+    return this.executePlaceOrder(input, this.accountTokenSupplier(accountId));
   }
 
   async cancelOrder(input: CancelOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrder');
 
-    // input.accountId is the accountExternalId (string) for the wire body.
-    return this.executeCancelOrder(input.accountId, input.vendorOrderId);
+    throw new DomainError(
+      'cancelOrder requires an account-scoped executor credential; use cancelOrderForAccount',
+      'ACCOUNT_SCOPED_CREDENTIAL_REQUIRED',
+      { accountExternalId: input.accountId, vendorOrderId: input.vendorOrderId },
+    );
   }
 
   async cancelOrderForAccount(
@@ -226,37 +289,30 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     // Internal PK only used upstream for credential resolution (via the
     // token supplier closure). Wire body uses accountExternalId.
-    void accountId;
-
-    return this.executeCancelOrder(accountExternalId, externalOrderId);
+    return this.executeCancelOrder(
+      accountExternalId,
+      externalOrderId,
+      this.accountTokenSupplier(accountId),
+    );
   }
 
   async modifyOrder(input: ModifyOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'modifyOrder');
 
-    try {
-      const body: ModifyOrderRequestContract = {
-        acntNo: input.accountId,
-        ordNo: input.vendorOrderId,
-        qty: input.quantity,
-        prc: input.price,
-      };
+    throw new DomainError(
+      'modifyOrder requires an account-scoped executor credential; use modifyOrderForAccount',
+      'ACCOUNT_SCOPED_CREDENTIAL_REQUIRED',
+      { accountExternalId: input.accountId, vendorOrderId: input.vendorOrderId },
+    );
+  }
 
-      const response = await this.opts.apiClient.request<
-        ModifyOrderRequestContract,
-        ModifyOrderResponseContract
-      >({
-        apiId: APIID_MODIFY,
-        endpointPath: PATH_ORDER,
-        body,
-      });
+  async modifyOrderForAccount(
+    accountId: number,
+    input: ModifyOrderInput,
+  ): Promise<OrderAckModel> {
+    this.assertProfile('executor', 'modifyOrderForAccount');
 
-      return mapOrderResponseToAck(response, 'accepted');
-    } catch (err) {
-      throw this.wrapVendorError(err, 'modifyOrder', {
-        vendorOrderId: input.vendorOrderId,
-      });
-    }
+    return this.executeModifyOrder(input, this.accountTokenSupplier(accountId));
   }
 
   async fetchChartCandles(
@@ -409,6 +465,10 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     this.opts.wsClient.onClose((code, reason) => {
       this.loggedIn = false;
+      if (this.activeWsCredential) {
+        this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+        this.activeWsCredential = null;
+      }
 
       if (this.userInitiatedDisconnect) return;
 
@@ -436,6 +496,11 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   async disconnectMarketDataStream(): Promise<void> {
     this.userInitiatedDisconnect = true;
+
+    if (this.activeWsCredential) {
+      this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+    }
+    this.activeWsCredential = null;
 
     this.subscriptions.clear();
 
@@ -505,6 +570,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       this.logger.log(`REG type=${realtimeType} symbols=${symbols.length}`);
     }
 
+    this.recordWsSymbolUsage();
+
     return {
       subscribedSymbols: Array.from(this.subscriptions.keys()),
       unsubscribe: (unsubInput) =>
@@ -549,9 +616,14 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
       this.logger.log(`REMOVE type=${realtimeType} symbols=${symbols.length}`);
     }
+
+    this.recordWsSymbolUsage();
   }
 
-  private async executePlaceOrder(input: PlaceOrderInput): Promise<OrderAckModel> {
+  private async executePlaceOrder(
+    input: PlaceOrderInput,
+    tokenSupplier?: KiwoomTokenSupplier,
+  ): Promise<OrderAckModel> {
     try {
       const apiId = input.side === 'buy' ? APIID_PLACE_BUY : APIID_PLACE_SELL;
       // ordTp: 00 = 지정가 (limit), 03 = 시장가 (market).
@@ -583,6 +655,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId,
         endpointPath: PATH_ORDER,
         body,
+        tokenSupplier,
       });
 
       return mapOrderResponseToAck(response, 'accepted');
@@ -596,6 +669,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private async executeCancelOrder(
     accountExternalId: string,
     externalOrderId: string,
+    tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<OrderAckModel> {
     try {
       const body: CancelOrderRequestContract = {
@@ -610,6 +684,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId: APIID_CANCEL,
         endpointPath: PATH_ORDER,
         body,
+        tokenSupplier,
       });
 
       return mapOrderResponseToAck(response, 'cancelled');
@@ -617,6 +692,36 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       throw this.wrapVendorError(err, 'cancelOrder', {
         accountExternalId,
         externalOrderId,
+      });
+    }
+  }
+
+  private async executeModifyOrder(
+    input: ModifyOrderInput,
+    tokenSupplier?: KiwoomTokenSupplier,
+  ): Promise<OrderAckModel> {
+    try {
+      const body: ModifyOrderRequestContract = {
+        acntNo: input.accountId,
+        ordNo: input.vendorOrderId,
+        qty: input.quantity,
+        prc: input.price,
+      };
+
+      const response = await this.opts.apiClient.request<
+        ModifyOrderRequestContract,
+        ModifyOrderResponseContract
+      >({
+        apiId: APIID_MODIFY,
+        endpointPath: PATH_ORDER,
+        body,
+        tokenSupplier,
+      });
+
+      return mapOrderResponseToAck(response, 'accepted');
+    } catch (err) {
+      throw this.wrapVendorError(err, 'modifyOrder', {
+        vendorOrderId: input.vendorOrderId,
       });
     }
   }
@@ -670,13 +775,44 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     });
   }
 
-  private async performLogin(): Promise<void> {
-    const ack = this.installLoginAckGate();
-    const token = await this.opts.tokenSupplier();
+  private accountTokenSupplier(accountId: number): KiwoomTokenSupplier {
+    if (!this.opts.accountTokenSupplier) {
+      throw new DomainError(
+        'account-scoped token supplier is not configured',
+        'ACCOUNT_TOKEN_SUPPLIER_MISSING',
+        { profile: this.opts.profile, accountId },
+      );
+    }
 
-    await this.opts.wsClient.send({ trnm: 'LOGIN', token });
+    const supplier = this.opts.accountTokenSupplier;
+
+    return () => supplier(accountId);
+  }
+
+  private async performLogin(): Promise<void> {
+    const tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
+    const ack = this.installLoginAckGate();
+
+    await this.opts.wsClient.send({ trnm: 'LOGIN', token: tokenResult.token });
 
     await ack;
+
+    if (
+      this.activeWsCredential &&
+      (!tokenResult.credential ||
+        this.activeWsCredential.credentialId !== tokenResult.credential.credentialId)
+    ) {
+      this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+    }
+
+    this.activeWsCredential = tokenResult.credential;
+    if (tokenResult.credential) {
+      this.opts.usage?.markWsConnected(
+        this.opts.profile,
+        tokenResult.credential,
+        this.subscriptions.size,
+      );
+    }
 
     const delay = this.opts.postLoginDelayMs ?? DEFAULT_POST_LOGIN_DELAY_MS;
 
@@ -784,6 +920,18 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
       this.logger.log(`REG (replay) type=${realtimeType} symbols=${symbols.length}`);
     }
+
+    this.recordWsSymbolUsage();
+  }
+
+  private recordWsSymbolUsage(): void {
+    if (!this.activeWsCredential) return;
+
+    this.opts.usage?.markWsSymbols(
+      this.opts.profile,
+      this.activeWsCredential,
+      this.subscriptions.size,
+    );
   }
 
   private assertProfile(expected: BrokerageVendorProfile, method: string): void {

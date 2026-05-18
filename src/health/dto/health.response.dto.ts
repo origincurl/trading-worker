@@ -1,4 +1,5 @@
 import type { WorkerRole } from '@config/runtime.config';
+import type { CredentialUsageSnapshot } from '@external/brokerage/credential/credential-usage.service';
 
 export interface LiveResponseDto {
   status: 'ok';
@@ -29,6 +30,7 @@ export interface HealthResponseDto {
   workerInstanceId: string;
   activeRoles: readonly WorkerRole[];
   roleStatuses: readonly RoleStatusDto[];
+  credentialUsage?: readonly CredentialUsageSnapshot[];
   shard?: { index: number; count: number };
   nodeEnv: string;
   timestamp: string;

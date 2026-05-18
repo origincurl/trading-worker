@@ -1,6 +1,7 @@
 import { Injectable, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
+import { redactPotentialSecrets } from '@common/util/redact.util';
 import type { Brokerage } from '@shared/model/account/brokerage.enum';
 import {
   ApiCredentialStatus,
@@ -60,7 +61,7 @@ export class CollectorCredentialRepositoryImpl implements CollectorCredentialRep
       .update(CollectorCredentialEntity)
       .set({
         lastFailedAt: new Date(),
-        lastErrorMessage: reason,
+        lastErrorMessage: redactPotentialSecrets(reason),
         consecutiveFailures: () => '"consecutive_failures" + 1',
       })
       .where({ id })

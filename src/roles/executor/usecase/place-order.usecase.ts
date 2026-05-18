@@ -4,6 +4,10 @@ import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { EXECUTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
 import { ExecutorOrderService } from '@roles/executor/service/executor-order.service';
+import { Brokerage } from '@shared/model/account/brokerage.enum';
+import { MarketEnv } from '@shared/model/api-credential/market-env.enum';
+import { ACCOUNT_REPOSITORY } from '@shared/persistence/account/account.token';
+import type { AccountRepository } from '@shared/persistence/account/account.repository';
 import { BUS_STREAMS } from '@shared/bus/bus.token';
 import type { BusStreams } from '@shared/bus/bus-streams.interface';
 import {
@@ -40,6 +44,7 @@ export class PlaceOrderUsecase {
   constructor(
     @Inject(EXECUTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(BUS_STREAMS) private readonly streams: BusStreams,
+    @Inject(ACCOUNT_REPOSITORY) private readonly accountRepo: AccountRepository,
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
     private readonly orderService: ExecutorOrderService,
     private readonly eventFactory: WorkerEventFactory,
@@ -71,6 +76,27 @@ export class PlaceOrderUsecase {
       throw new DomainError('limit order requires positive price', 'SIGNAL_INVALID_PRICE', {
         signalId: payload.signalId,
       });
+    }
+
+    let internalAccountId: number;
+    try {
+      internalAccountId = await this.resolveInternalAccountId(payload);
+    } catch (err) {
+      this._rejectedCount += 1;
+
+      const code = err instanceof DomainError ? err.code : 'SIGNAL_ACCOUNT_RESOLVE_FAILED';
+      const message = err instanceof Error ? err.message : String(err);
+      const clientOrderId = payload.clientOrderIdHint ?? `unresolved-${payload.signalId}`;
+
+      this.logger.warn(`signal account resolve failed signalId=${payload.signalId}: ${message}`);
+
+      await this.produceOrderFailed(payload, clientOrderId, code, message).catch((e) =>
+        this.logger.warn(
+          `order.failed produce failed signalId=${payload.signalId}: ${e instanceof Error ? e.message : e}`,
+        ),
+      );
+
+      throw err;
     }
 
     const prepared = await this.orderService.prepareAttempt({
@@ -108,7 +134,7 @@ export class PlaceOrderUsecase {
     );
 
     try {
-      const ack = await this.gateway.placeOrder({
+      const ack = await this.gateway.placeOrderForAccount(internalAccountId, {
         accountId: payload.accountId,
         clientOrderId: prepared.clientOrderId,
         symbol: payload.symbol,
@@ -144,6 +170,29 @@ export class PlaceOrderUsecase {
         ),
       );
     }
+  }
+
+  private async resolveInternalAccountId(payload: SignalDetectedJobPayload): Promise<number> {
+    if (payload.internalAccountId !== undefined) {
+      return payload.internalAccountId;
+    }
+
+    const account = await this.accountRepo.findByExternalKey(
+      toBrokerage(payload.provider),
+      toDbMarketEnv(payload.marketEnv),
+      payload.accountId,
+    );
+
+    if (!account) {
+      throw new DomainError('signal account could not be resolved', 'SIGNAL_ACCOUNT_NOT_FOUND', {
+        signalId: payload.signalId,
+        provider: payload.provider,
+        marketEnv: payload.marketEnv,
+        accountExternalId: payload.accountId,
+      });
+    }
+
+    return account.id;
   }
 
   private async produceDecisionMade(payload: SignalDetectedJobPayload): Promise<void> {
@@ -227,4 +276,16 @@ export class PlaceOrderUsecase {
 
     await this.streams.produce(ORDER_FAILED_STREAM, event);
   }
+}
+
+function toBrokerage(provider: SignalDetectedJobPayload['provider']): Brokerage {
+  if (provider === 'kiwoom') return Brokerage.Kiwoom;
+
+  throw new DomainError('unsupported signal provider', 'SIGNAL_PROVIDER_UNSUPPORTED', {
+    provider,
+  });
+}
+
+function toDbMarketEnv(marketEnv: SignalDetectedJobPayload['marketEnv']): MarketEnv {
+  return marketEnv === 'mock' ? MarketEnv.Mock : MarketEnv.Production;
 }

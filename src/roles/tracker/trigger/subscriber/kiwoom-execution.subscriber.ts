@@ -35,19 +35,12 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    try {
-      await this.gateway.connectMarketDataStream((frame) => this.handleFrame(frame));
-
-      this._connected = true;
-
-      this.logger.log('execution stream connected');
-    } catch (err) {
-      this._connected = false;
-
-      this.logger.warn(
-        `execution WS connect failed — tracker boots degraded: ${err instanceof Error ? err.message : err}`,
-      );
-    }
+    // Execution stream must be account-credential scoped. The generic
+    // EXECUTOR_BROKERAGE_VENDOR websocket has no accountId and is
+    // intentionally not used, otherwise it could log in with the wrong
+    // appkey. REST tracker paths are account-scoped; account-scoped
+    // execution WS fan-out is a separate implementation.
+    this.logger.warn('execution WS disabled until account-scoped websocket fan-out is implemented');
   }
 
   async onApplicationShutdown(): Promise<void> {

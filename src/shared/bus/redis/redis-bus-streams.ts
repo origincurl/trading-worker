@@ -51,6 +51,8 @@ class RedisStreamConsumer implements BusStreamConsumer {
 
   private loopPromise?: Promise<void>;
 
+  private blockingClient?: Redis;
+
   constructor(
     private readonly client: Redis | undefined,
     private readonly opts: CreateConsumerOptions,
@@ -68,6 +70,8 @@ class RedisStreamConsumer implements BusStreamConsumer {
     if (this.running) return;
 
     await this.ensureGroup();
+    this.blockingClient = this.client.duplicate();
+    await this.blockingClient.connect();
 
     this.running = true;
 
@@ -78,12 +82,14 @@ class RedisStreamConsumer implements BusStreamConsumer {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.blockingClient?.disconnect();
 
     if (this.loopPromise) {
       await this.loopPromise;
 
       this.loopPromise = undefined;
     }
+    this.blockingClient = undefined;
   }
 
   private async ensureGroup(): Promise<void> {
@@ -108,7 +114,7 @@ class RedisStreamConsumer implements BusStreamConsumer {
 
     while (this.running) {
       try {
-        const res = (await this.client!.xreadgroup(
+        const res = (await this.blockingClient!.xreadgroup(
           'GROUP',
           this.opts.group,
           this.opts.consumer,
@@ -147,7 +153,9 @@ class RedisStreamConsumer implements BusStreamConsumer {
       } catch (err) {
         this.logger.error(`xreadgroup error: ${err}`);
 
-        await new Promise((r) => setTimeout(r, 1000));
+        if (this.running) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
       }
     }
   }

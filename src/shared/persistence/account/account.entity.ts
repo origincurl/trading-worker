@@ -12,6 +12,10 @@ import { Brokerage } from '@shared/model/account/brokerage.enum';
 import { AccountModel } from '@shared/model/account/account.model';
 
 @Index('IDX_account_investor_id', ['investorId'])
+@Index('uq_accounts_investor_external', ['investorId', 'brokerage', 'accountNumber', 'isPaper'], {
+  unique: true,
+  where: '"deleted_at" IS NULL AND "account_number" IS NOT NULL',
+})
 @Entity('accounts')
 export class AccountEntity {
   @PrimaryGeneratedColumn({ type: 'bigint' })

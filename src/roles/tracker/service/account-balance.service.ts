@@ -52,7 +52,7 @@ export class AccountBalanceService {
 
   async syncOne(target: TrackerAccountTarget): Promise<AccountBalanceModel | null> {
     try {
-      const vendor = await this.gateway.getAccountBalance({
+      const vendor = await this.gateway.getAccountBalanceForAccount(target.accountId, {
         accountId: target.accountExternalId,
       });
 

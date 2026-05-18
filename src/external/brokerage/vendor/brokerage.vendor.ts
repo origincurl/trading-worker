@@ -83,7 +83,12 @@ export interface GetStockMasterListInput {
 export interface BrokerageVendor {
   // collector-facing read paths
   getAccountBalance(input: GetAccountBalanceInput): Promise<AccountBalanceModel>;
+  getAccountBalanceForAccount(
+    accountId: number,
+    input: GetAccountBalanceInput,
+  ): Promise<AccountBalanceModel>;
   getPositions(input: GetPositionsInput): Promise<PositionModel[]>;
+  getPositionsForAccount(accountId: number, input: GetPositionsInput): Promise<PositionModel[]>;
   // Phase E: chart catchup. Collector-only. Returns MarketCandleClosedPayload[]
   // ordered ascending by candleTime, filtered to the [fromIso, toIso) range.
   fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]>;
@@ -110,6 +115,7 @@ export interface BrokerageVendor {
     externalOrderId: string,
   ): Promise<OrderAckModel>;
   modifyOrder(input: ModifyOrderInput): Promise<OrderAckModel>;
+  modifyOrderForAccount(accountId: number, input: ModifyOrderInput): Promise<OrderAckModel>;
 
   // collector-facing real-time stream paths
   connectMarketDataStream(handler: MarketDataFrameHandler): Promise<void>;

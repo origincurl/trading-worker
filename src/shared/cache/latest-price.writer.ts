@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 import { safeStringify } from '@common/util/safe-stringify';
-import { REDIS_CLIENT, type RedisClientToken } from './redis.module';
+import { REDIS_CLIENT, type RedisClientToken } from './redis.tokens';
 import { RedisKeyBuilder } from './redis-key.builder';
 
 // Phase 2: skeleton only. Phase 6 wires this into the collector pipeline.

@@ -16,6 +16,7 @@ export interface SignalDetectedJobPayload {
   readonly strategy: string;
   readonly provider: MarketTickProvider;
   readonly marketEnv: 'mock' | 'production';
+  readonly internalAccountId?: number;
   readonly accountId: string;
   readonly symbol: string;
   readonly side: OrderIntentSide;

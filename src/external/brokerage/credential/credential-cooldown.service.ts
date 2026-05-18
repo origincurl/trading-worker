@@ -1,4 +1,5 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { redactPotentialSecrets } from '@common/util/redact.util';
 
 // In-memory cooldown map keyed by credentialId. CredentialSourceService
 // filters out credentials currently on cooldown when selecting; callers
@@ -19,8 +20,10 @@ export class CredentialCooldownService {
 
     this.cooldownUntil.set(credentialId, until);
 
+    const safeReason = redactPotentialSecrets(reason) ?? 'credential failure';
+
     this.logger.warn(
-      `credential id=${credentialId} cooldown ${ms}ms reason="${reason}" until=${new Date(until).toISOString()}`,
+      `credential id=${credentialId} cooldown ${ms}ms reason="${safeReason}" until=${new Date(until).toISOString()}`,
     );
   }
 

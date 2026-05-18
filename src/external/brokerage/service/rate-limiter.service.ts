@@ -19,13 +19,17 @@ export interface RateLimiterOptions {
 export class RateLimiter {
   private readonly logger: Logger;
 
+  private opts: RateLimiterOptions;
+
   private tokens: number;
 
   private lastRefillMs: number;
 
   private inFlight = 0;
 
-  constructor(private readonly opts: RateLimiterOptions) {
+  constructor(opts: RateLimiterOptions) {
+    this.opts = opts;
+
     if (opts.capacity <= 0) {
       throw new Error('RateLimiter: capacity must be > 0');
     }
@@ -67,6 +71,24 @@ export class RateLimiter {
 
   release(): void {
     if (this.inFlight > 0) this.inFlight--;
+  }
+
+  currentInFlight(): number {
+    return this.inFlight;
+  }
+
+  reconfigure(next: RateLimiterOptions): void {
+    if (next.capacity <= 0) {
+      throw new Error('RateLimiter: capacity must be > 0');
+    }
+
+    if (next.refillPerSecond <= 0) {
+      throw new Error('RateLimiter: refillPerSecond must be > 0');
+    }
+
+    this.refill();
+    this.opts = next;
+    this.tokens = Math.min(this.tokens, next.capacity);
   }
 
   async run<T>(fn: () => Promise<T>): Promise<T> {

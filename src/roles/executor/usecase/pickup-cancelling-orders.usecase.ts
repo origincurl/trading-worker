@@ -9,9 +9,10 @@ import type { OrderModel } from '@shared/model/order/order.model';
 
 const DEFAULT_BATCH_SIZE = 20;
 
-// Phase J: drains CANCEL_REQUESTED orders. The BE flips the row when a
-// user / admin asks to cancel; this loop hits the vendor cancel REST path
-// keyed by the row's externalOrderId. Terminal status (CANCELLED /
+// Phase J: drains cancellation claims. The BE flips the row to
+// CANCEL_REQUESTED when a user / admin asks to cancel; the repository
+// atomically claims it as CANCEL_SUBMITTING before this loop hits the vendor
+// cancel REST path keyed by the row's externalOrderId. Terminal status (CANCELLED /
 // PARTIALLY_FILLED-then-CANCELLED) is set by tracker once the fill stream
 // confirms — we only stamp CANCELLED on a clean vendor ack with no fills,
 // and FAILED when the vendor / infra blows up so the row leaves the

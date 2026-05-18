@@ -32,12 +32,13 @@ export class TestCredentialsUsecase {
         return this.probeKiwoom('collector');
 
       case CredentialTarget.KiwoomExecutor:
-        return this.probeKiwoom('executor');
+        return this.probeKiwoom('executor', input.accountId);
     }
   }
 
   private async probeKiwoom(
     profile: 'collector' | 'executor',
+    accountId?: number,
   ): Promise<TestCredentialsResponseDto> {
     const gateway = profile === 'collector' ? this.collectorGateway : this.executorGateway;
 
@@ -49,7 +50,17 @@ export class TestCredentialsUsecase {
     }
 
     try {
-      const token = await gateway.probeAccessToken();
+      if (profile === 'executor' && !accountId) {
+        return {
+          ok: false,
+          detail: 'executor credential probe requires accountId',
+        };
+      }
+
+      const token =
+        profile === 'executor'
+          ? await gateway.probeAccessTokenForAccount(accountId as number)
+          : await gateway.probeAccessToken();
 
       // Never log or surface the token. Length is enough to confirm
       // the call returned something non-empty.

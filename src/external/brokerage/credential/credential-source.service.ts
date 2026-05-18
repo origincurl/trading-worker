@@ -62,7 +62,7 @@ export class CredentialSourceService {
     }
 
     const cursorKey = `${brokerage}:${marketEnv}`;
-    const cursor = this.collectorCursor.get(cursorKey) ?? 0;
+    const cursor = this.collectorCursor.get(cursorKey) ?? Math.floor(Math.random() * eligible.length);
     const picked = eligible[cursor % eligible.length];
 
     this.collectorCursor.set(cursorKey, cursor + 1);

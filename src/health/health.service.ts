@@ -6,6 +6,7 @@ import { PERSISTENCE_CONFIG, type PersistenceConfig } from '@config/persistence.
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 import { RUNTIME_CONFIG, type RuntimeConfig, type WorkerRole } from '@config/runtime.config';
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
+import { CredentialUsageService } from '@external/brokerage/credential/credential-usage.service';
 import { ROLE_STATUS_TOKENS, type RoleStatusProvider } from '@roles/role-status';
 import type {
   HealthResponseDto,
@@ -29,6 +30,7 @@ export class HealthService {
     @Optional()
     @InjectDataSource()
     private readonly dataSource?: DataSource,
+    @Optional() private readonly credentialUsage?: CredentialUsageService,
   ) {}
 
   live(): LiveResponseDto {
@@ -67,6 +69,7 @@ export class HealthService {
       workerInstanceId: this.runtime.workerInstanceId,
       activeRoles: this.runtime.roles,
       roleStatuses: this.collectRoleStatuses(),
+      credentialUsage: this.credentialUsage?.snapshot(),
       shard,
       nodeEnv: this.runtime.nodeEnv,
       timestamp: new Date().toISOString(),

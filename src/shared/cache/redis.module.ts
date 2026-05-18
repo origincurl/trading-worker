@@ -13,17 +13,13 @@ import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 import { HeartbeatWriter } from './heartbeat.writer';
 import { LatestPriceWriter } from './latest-price.writer';
 import { RedisKeyBuilder } from './redis-key.builder';
-
-export const REDIS_CLIENT = Symbol('REDIS_CLIENT');
-// Dedicated subscriber connection — ioredis forbids non-subscribe commands
-// on a connection that has issued SUBSCRIBE, so PubSub needs its own client.
-export const REDIS_SUBSCRIBER = Symbol('REDIS_SUBSCRIBER');
+import { REDIS_CLIENT, REDIS_SUBSCRIBER, type RedisClientToken } from './redis.tokens';
 
 // Nest rejects `null` from useFactory but accepts `undefined` when the
 // consumer marks the parameter @Optional(). All consumers of REDIS_CLIENT /
 // REDIS_SUBSCRIBER MUST decorate their injection with @Optional() and handle
 // the disabled case explicitly.
-export type RedisClientToken = Redis | undefined;
+export { REDIS_CLIENT, REDIS_SUBSCRIBER, type RedisClientToken } from './redis.tokens';
 
 const REDIS_CONNECT_OPTIONS: RedisOptions = {
   maxRetriesPerRequest: null,

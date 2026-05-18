@@ -3,6 +3,7 @@ import {
   KiwoomTokenService,
   type AccessTokenBundle,
 } from '../platforms/kiwoom/auth/kiwoom-token.service';
+import { redactPotentialSecrets } from '@common/util/redact.util';
 import type { BrokerageCredentialMaterial } from '../credential/brokerage-credential-material';
 import { CredentialCooldownService } from '../credential/credential-cooldown.service';
 
@@ -90,7 +91,8 @@ export class AccessTokenCacheService {
           this.cooldown.setCooldown(
             material.credentialId,
             AUTH_FAIL_COOLDOWN_MS,
-            issueErr instanceof Error ? issueErr.message : String(issueErr),
+            redactPotentialSecrets(issueErr instanceof Error ? issueErr.message : String(issueErr)) ??
+              'token issue failed',
           );
 
           throw issueErr;
@@ -100,7 +102,7 @@ export class AccessTokenCacheService {
       this.cooldown.setCooldown(
         material.credentialId,
         AUTH_FAIL_COOLDOWN_MS,
-        err instanceof Error ? err.message : String(err),
+        redactPotentialSecrets(err instanceof Error ? err.message : String(err)) ?? 'token issue failed',
       );
 
       throw err;

@@ -1,4 +1,5 @@
 import { Global, Module, type Provider } from '@nestjs/common';
+import { DomainError } from '@common/error/domain.error';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { Brokerage } from '@shared/model/account/brokerage.enum';
 import { MarketEnv } from '@shared/model/api-credential/market-env.enum';
@@ -10,10 +11,11 @@ import {
 } from './brokerage.token';
 import { CredentialCooldownService } from './credential/credential-cooldown.service';
 import { CredentialSourceService } from './credential/credential-source.service';
+import { CredentialUsageService } from './credential/credential-usage.service';
 import { BrokerageVendorResolver } from './service/brokerage-vendor.resolver';
 import { RateLimiter } from './service/rate-limiter.service';
 import { KiwoomTokenService } from './platforms/kiwoom/auth/kiwoom-token.service';
-import { KiwoomApiClient } from './platforms/kiwoom/kiwoom.api-client';
+import { KiwoomApiClient, type KiwoomTokenResult } from './platforms/kiwoom/kiwoom.api-client';
 import { KiwoomBrokerageVendor } from './platforms/kiwoom/kiwoom-brokerage.vendor';
 import { KiwoomWsClient } from './platforms/kiwoom/kiwoom-ws.client';
 
@@ -33,10 +35,11 @@ function buildKiwoomGateway(
   tokenService: KiwoomTokenService,
   tokenCache: AccessTokenCacheService,
   source: CredentialSourceService,
+  usage: CredentialUsageService,
 ): KiwoomBrokerageVendor {
   let cachedCredentialId: number | null = null;
 
-  const collectorTokenSupplier = async (): Promise<string> => {
+  const collectorTokenSupplier = async (): Promise<KiwoomTokenResult> => {
     // Collector profile: resolve marketEnv from KIWOOM_MARKET_ENV. The
     // lowercase value lives on KiwoomConfig; convert to the DB enum form.
     const dbMarketEnv =
@@ -46,25 +49,37 @@ function buildKiwoomGateway(
 
     cachedCredentialId = material.credentialId;
 
-    return tokenCache.getAccessToken(material);
+    const token = await tokenCache.getAccessToken(material);
+
+    return {
+      token,
+      credential: { kind: 'collector', credentialId: material.credentialId },
+    };
   };
 
-  const executorTokenSupplier = async (): Promise<string> => {
-    // Executor profile without an accountId would be a bug — every
-    // executor call goes through placeOrderForAccount which sets up a
-    // per-call supplier. The default path here exists only so admin
-    // probe / generic WS LOGIN have a fallback (collector pool). The
-    // gateway.assertProfile guard on placeOrder() prevents accidental
-    // collector use on this gateway, so falling back to collector pool
-    // here is safe (probe path only).
-    const dbMarketEnv =
-      config.marketEnv === 'mock' ? MarketEnv.Mock : MarketEnv.Production;
+  const executorTokenSupplier = async (): Promise<KiwoomTokenResult> => {
+    throw new DomainError(
+      'executor credential resolution requires an accountId',
+      'EXECUTOR_ACCOUNT_ID_REQUIRED',
+      { profile },
+    );
+  };
 
-    const material = await source.selectCollectorCredential(Brokerage.Kiwoom, dbMarketEnv);
+  const accountTokenSupplier = async (accountId: number): Promise<KiwoomTokenResult> => {
+    const material = await source.selectAccountCredential(accountId);
 
     cachedCredentialId = material.credentialId;
 
-    return tokenCache.getAccessToken(material);
+    const token = await tokenCache.getAccessToken(material);
+
+    return {
+      token,
+      credential: {
+        kind: 'executor',
+        credentialId: material.credentialId,
+        accountId,
+      },
+    };
   };
 
   const tokenSupplier = profile === 'collector' ? collectorTokenSupplier : executorTokenSupplier;
@@ -82,6 +97,7 @@ function buildKiwoomGateway(
     restUrl: config.restUrl,
     tokenSupplier,
     rateLimiter,
+    usage,
   });
 
   const wsClient = new KiwoomWsClient({
@@ -95,6 +111,8 @@ function buildKiwoomGateway(
     apiClient,
     wsClient,
     tokenSupplier,
+    accountTokenSupplier: profile === 'executor' ? accountTokenSupplier : undefined,
+    usage,
     invalidateToken: () => {
       // After repeated LOGIN failures the gateway calls this so the
       // cached bundle for the credential most recently used by the
@@ -114,13 +132,15 @@ const collectorGatewayProvider: Provider = {
     KiwoomTokenService,
     AccessTokenCacheService,
     CredentialSourceService,
+    CredentialUsageService,
   ],
   useFactory: (
     config: KiwoomConfig,
     tokenService: KiwoomTokenService,
     tokenCache: AccessTokenCacheService,
     source: CredentialSourceService,
-  ) => buildKiwoomGateway(config, 'collector', tokenService, tokenCache, source),
+    usage: CredentialUsageService,
+  ) => buildKiwoomGateway(config, 'collector', tokenService, tokenCache, source, usage),
 };
 
 const executorGatewayProvider: Provider = {
@@ -130,13 +150,15 @@ const executorGatewayProvider: Provider = {
     KiwoomTokenService,
     AccessTokenCacheService,
     CredentialSourceService,
+    CredentialUsageService,
   ],
   useFactory: (
     config: KiwoomConfig,
     tokenService: KiwoomTokenService,
     tokenCache: AccessTokenCacheService,
     source: CredentialSourceService,
-  ) => buildKiwoomGateway(config, 'executor', tokenService, tokenCache, source),
+    usage: CredentialUsageService,
+  ) => buildKiwoomGateway(config, 'executor', tokenService, tokenCache, source, usage),
 };
 
 @Global()
@@ -144,6 +166,7 @@ const executorGatewayProvider: Provider = {
   providers: [
     CredentialCooldownService,
     CredentialSourceService,
+    CredentialUsageService,
     KiwoomTokenService,
     AccessTokenCacheService,
     collectorGatewayProvider,
@@ -157,6 +180,7 @@ const executorGatewayProvider: Provider = {
     CredentialSourceService,
     AccessTokenCacheService,
     CredentialCooldownService,
+    CredentialUsageService,
   ],
 })
 export class BrokerageModule {}

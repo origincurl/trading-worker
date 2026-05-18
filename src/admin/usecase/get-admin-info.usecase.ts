@@ -1,7 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
 import type { AdminInfoResponseDto } from '@admin/dto/admin-info.response.dto';
+import { CredentialUsageService } from '@external/brokerage/credential/credential-usage.service';
 
 @Injectable()
 export class GetAdminInfoUsecase {
@@ -10,6 +11,7 @@ export class GetAdminInfoUsecase {
   constructor(
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
+    @Optional() private readonly credentialUsage?: CredentialUsageService,
   ) {}
 
   execute(): AdminInfoResponseDto {
@@ -29,6 +31,7 @@ export class GetAdminInfoUsecase {
         wsHost: this.kiwoom.wsUrl ? hostnameOf(this.kiwoom.wsUrl) : null,
         restHost: this.kiwoom.restUrl ? hostnameOf(this.kiwoom.restUrl) : null,
       },
+      credentialUsage: this.credentialUsage?.snapshot(),
       uptimeSec: Math.floor((Date.now() - this.startedAt) / 1000),
       startedAtIso: startedAt.toISOString(),
     };

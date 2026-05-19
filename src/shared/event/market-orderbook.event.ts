@@ -26,6 +26,7 @@ export interface MarketOrderbookPayload {
   readonly bestAsk: { price: number; size: number } | null;
   readonly spread: number | null;
   readonly spreadBps: number | null;
+  readonly tickSize: number | null;
   readonly totalBidSize: number | null;
   readonly totalAskSize: number | null;
   readonly levels: readonly OrderbookLevel[];

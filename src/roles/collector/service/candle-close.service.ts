@@ -1,11 +1,13 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { BUS_STREAMS } from '@shared/bus/bus.token';
+import { BUS_PUBLISHER, BUS_STREAMS } from '@shared/bus/bus.token';
+import type { BusPublisher } from '@shared/bus/bus-publisher.interface';
 import type { BusStreams } from '@shared/bus/bus-streams.interface';
 import { WorkerEventFactory } from '@shared/event/event-factory';
 import {
   MARKET_CANDLE_CLOSED_EVENT_TYPE,
   MARKET_CANDLE_CLOSED_SCHEMA_VERSION,
   MARKET_CANDLE_CLOSED_STREAM,
+  marketCandleClosedChannel,
   type MarketCandleClosedPayload,
 } from '@shared/event/market-candle-closed.event';
 import { CANDLE_REPOSITORY, type CandleRepository } from '../repository/candle.repository';
@@ -24,6 +26,7 @@ export class CandleCloseService {
 
   constructor(
     @Inject(CANDLE_REPOSITORY) private readonly repo: CandleRepository,
+    @Inject(BUS_PUBLISHER) private readonly publisher: BusPublisher,
     @Inject(BUS_STREAMS) private readonly streams: BusStreams,
     private readonly eventFactory: WorkerEventFactory,
   ) {}
@@ -62,22 +65,31 @@ export class CandleCloseService {
     // Repo first so a DB outage is loud (rather than emitting a closed
     // event nobody can persist), but Streams is fire-and-forget on
     // failure — calculator can replay via DB if it lags.
-    try {
-      await this.repo.upsertClosed(payload);
-    } catch (err) {
-      this.logger.warn(
-        `candle upsert failed (${candle.symbol}@${candle.bucketStart.toISOString()}): ${
-          err instanceof Error ? err.message : err
-        }`,
-      );
-    }
-
     const event = this.eventFactory.build({
       eventType: MARKET_CANDLE_CLOSED_EVENT_TYPE,
       schemaVersion: MARKET_CANDLE_CLOSED_SCHEMA_VERSION,
       role: 'collector',
       payload,
     });
+
+    try {
+      await this.repo.upsertClosed(payload);
+      await this.publisher.publish(
+        marketCandleClosedChannel(
+          payload.provider,
+          payload.marketEnv,
+          payload.symbol,
+          payload.intervalType,
+        ),
+        event,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `candle upsert/pubsub failed (${candle.symbol}@${candle.bucketStart.toISOString()}): ${
+          err instanceof Error ? err.message : err
+        }`,
+      );
+    }
 
     try {
       await this.streams.produce(MARKET_CANDLE_CLOSED_STREAM, event);

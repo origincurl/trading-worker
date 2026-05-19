@@ -33,3 +33,12 @@ export interface MarketCandleClosedPayload {
   // never overwrites a realtime candle for the same bucket.
   readonly dataSource: 'realtime' | 'catchup';
 }
+
+export function marketCandleClosedChannel(
+  provider: MarketTickProvider,
+  marketEnv: 'mock' | 'production',
+  symbol: string,
+  intervalType: CandleInterval,
+): string {
+  return `market.candle.closed.${provider}.${marketEnv}.${symbol}.${intervalType}`;
+}

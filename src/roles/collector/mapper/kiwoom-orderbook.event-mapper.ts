@@ -70,6 +70,7 @@ export function parseOrderbook0D(
   const spread = bestBid && bestAsk ? Math.max(0, bestAsk.price - bestBid.price) : null;
   const mid = bestBid && bestAsk ? (bestAsk.price + bestBid.price) / 2 : null;
   const spreadBps = spread !== null && mid !== null && mid > 0 ? (spread / mid) * 10_000 : null;
+  const tickSize = inferOrderbookTickSize(levels);
 
   return {
     kind: 'orderbook',
@@ -84,6 +85,7 @@ export function parseOrderbook0D(
       bestAsk,
       spread,
       spreadBps,
+      tickSize,
       totalBidSize: parseUnsigned(values[ORDERBOOK_FID.TOTAL_BID_SIZE]),
       totalAskSize: parseUnsigned(values[ORDERBOOK_FID.TOTAL_ASK_SIZE]),
       levels,
@@ -112,6 +114,36 @@ function parseUnsigned(value: unknown): number | null {
   const n = parseSignedNumber(value);
 
   return n === null ? null : Math.abs(n);
+}
+
+function inferOrderbookTickSize(levels: readonly OrderbookLevel[]): number | null {
+  const prices = levels
+    .flatMap((level) => [level.bid?.price, level.ask?.price])
+    .filter((price): price is number => typeof price === 'number' && Number.isFinite(price))
+    .map((price) => Math.round(price))
+    .filter((price) => price > 0);
+  const uniquePrices = [...new Set(prices)].sort((a, b) => a - b);
+  if (uniquePrices.length < 2) return null;
+
+  let unit = 0;
+  for (let i = 1; i < uniquePrices.length; i += 1) {
+    const diff = uniquePrices[i] - uniquePrices[i - 1];
+    if (diff <= 0) continue;
+    unit = unit === 0 ? diff : gcd(unit, diff);
+  }
+
+  return unit > 0 ? unit : null;
+}
+
+function gcd(a: number, b: number): number {
+  let x = Math.abs(a);
+  let y = Math.abs(b);
+  while (y !== 0) {
+    const next = x % y;
+    x = y;
+    y = next;
+  }
+  return x;
 }
 
 function isStringRecord(value: unknown): value is Record<string, unknown> {

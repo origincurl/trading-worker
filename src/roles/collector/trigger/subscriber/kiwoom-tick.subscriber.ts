@@ -7,8 +7,6 @@ import {
 } from '@nestjs/common';
 import { COLLECTOR_CONFIG, type CollectorConfig } from '@config/collector.config';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
-import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
-import { shouldHandle } from '@common/util/shard';
 import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type {
   BrokerageVendor,
@@ -19,10 +17,10 @@ import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-univers
 import { MARKET_INDEX_CODES } from '@shared/event/market-index.event';
 import { resolveMarketRealtimeProfile } from '@roles/collector/market-realtime-profile';
 
-// Connects to Kiwoom WS (LOGIN included), then:
-//   1. REGs the optional bootstrap symbol set (dev convenience)
-//   2. Primes the BE universe lease so production-approved symbols REG
-//      without waiting on the next scheduler tick
+// Connects to Kiwoom WS (LOGIN included), then primes the demand-driven
+// universe so FE/strategy-requested symbols REG without waiting for the next
+// scheduler tick. Individual symbol bootstrap is intentionally gone; only
+// market index defaults remain policy-driven.
 // WS failure does not crash the worker — status drops to degraded and
 // Phase 6.8 will layer reconnect on top.
 @Injectable()
@@ -37,7 +35,6 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(COLLECTOR_CONFIG) private readonly config: CollectorConfig,
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
-    @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
     private readonly usecase: IngestTickUsecase,
     private readonly refreshUniverse: RefreshUniverseUsecase,
   ) {}
@@ -51,8 +48,6 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    const bootstrap = this.applyShardFilter(this.config.bootstrapSymbols);
-
     try {
       await this.gateway.connectMarketDataStream((frame) => {
         // Sync handler — schedule async work and swallow errors here so a
@@ -77,17 +72,7 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
         );
       }
 
-      if (bootstrap.length > 0) {
-        await this.gateway.subscribeMarketData({ symbols: bootstrap, kinds });
-
-        this._subscribedSymbols = bootstrap;
-
-        this.logger.log(
-          `bootstrap subscribed: symbols=${bootstrap.length} kinds=[${kinds.join(',')}]`,
-        );
-      } else {
-        this.logger.log('no bootstrap symbols — waiting on universe lease');
-      }
+      this.logger.log(`waiting on demand-driven universe lease kinds=[${kinds.join(',')}]`);
 
       if (this.config.subscribeMarketIndex) {
         const indexCodes = Object.values(MARKET_INDEX_CODES);
@@ -99,8 +84,8 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
         );
       }
 
-      // Phase 6.7: prime universe lease once after WS is up so BE-approved
-      // symbols become subscribed without waiting for the scheduler tick.
+      // Prime universe lease once after WS is up so active FE/strategy demand
+      // becomes subscribed without waiting for the scheduler tick.
       await this.refreshUniverse
         .execute()
         .catch((err) =>
@@ -129,9 +114,5 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
     this._connected = false;
 
     this._subscribedSymbols = [];
-  }
-
-  private applyShardFilter(symbols: readonly string[]): string[] {
-    return symbols.filter((s) => shouldHandle(s, this.runtime.shardIndex, this.runtime.shardCount));
   }
 }

@@ -6,8 +6,9 @@ import type {
   ObservedSymbolSource,
 } from '@shared/model/universe/observed-symbol.model';
 
-// Phase B universe = admin-curated stocks ∪ admin-curated ETFs ∪
-// FE-observed stocks (redis HASH `fe:observation:stocks:refcnt`).
+// Live universe = FE-observed symbols now; strategy demand joins the same
+// demand-driven path later. Admin watchlists are intentionally not direct
+// broker WS sources.
 // UniverseService normalizes (dedup by symbol — same symbol can appear in
 // both stock and ETF lists with different source flags), applies the
 // shard hash filter, and exposes per-source counts for heartbeat metrics.
@@ -54,9 +55,9 @@ export class UniverseService {
     return this.lastAppliedAt?.getTime() ?? null;
   }
 
-  // Replaces the in-memory universe with the union of admin stocks +
-  // admin ETFs + FE-observed symbols. Returns the number of symbols that
-  // actually landed in this worker's shard.
+  // Replaces the in-memory universe with the union of active demand sources.
+  // Admin args are kept for compatibility with the source-counter model but
+  // normal refresh passes them empty. Returns symbols in this worker's shard.
   apply(
     adminStocks: readonly ObservedSymbolModel[],
     adminEtfs: readonly ObservedSymbolModel[],

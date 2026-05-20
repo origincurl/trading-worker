@@ -59,7 +59,7 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
           $7, $8, $9, $10, $11, $12, $13, $14,
           $15, $16, $17, $18, $19, $20, $21, NOW()
         )
-        ON CONFLICT (provider, market_env, symbol, interval_type, candle_time)
+        ON CONFLICT (provider, market_env, symbol, interval_type, candle_time, chart_market)
         DO UPDATE SET
           bucket_end = EXCLUDED.bucket_end,
           open = EXCLUDED.open,
@@ -129,8 +129,9 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
         low numeric(18, 4) NOT NULL,
         close numeric(18, 4) NOT NULL,
         volume numeric(24, 4) NOT NULL,
+        chart_market varchar(16) NOT NULL DEFAULT 'KRW',
         last_source_ts timestamptz NULL,
-        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time)
+        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)
       )
     `);
     await this.dataSource.query(`
@@ -164,6 +165,29 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_market varchar(16) NOT NULL DEFAULT 'UNKNOWN'
     `);
     await this.dataSource.query(`
+      UPDATE market_candles
+      SET chart_market = 'KRW'
+      WHERE chart_market IS NULL OR chart_market = 'UNKNOWN'
+    `);
+    await this.dataSource.query(`
+      DO $$
+      BEGIN
+        IF EXISTS (
+          SELECT 1
+          FROM pg_constraint
+          WHERE conrelid = 'market_candles'::regclass
+            AND conname = 'market_candles_pkey'
+        ) THEN
+          ALTER TABLE market_candles DROP CONSTRAINT market_candles_pkey;
+        END IF;
+      END $$;
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE market_candles
+      ADD CONSTRAINT market_candles_pkey
+      PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)
+    `);
+    await this.dataSource.query(`
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT NOW()
     `);
     await this.dataSource.query(`
@@ -171,7 +195,7 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
     `);
     await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS ix_market_candles_query
-      ON market_candles (provider, market_env, symbol, interval_type, candle_time)
+      ON market_candles (provider, market_env, symbol, interval_type, chart_market, candle_time)
     `);
   }
 }

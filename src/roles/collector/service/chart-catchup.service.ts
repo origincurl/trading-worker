@@ -9,6 +9,7 @@ import type {
   CandleChartMarket,
   MarketCandleClosedPayload,
 } from '@shared/event/market-candle-closed.event';
+import { ChartEmptyRangeService } from './chart-empty-range.service';
 
 // Phase E: actual catchup execution body — vendor fetch + candle upsert.
 // Consolidates what used to live in process-chart-catchup-lease.usecase.
@@ -37,6 +38,7 @@ export class ChartCatchupService {
   constructor(
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(CANDLE_REPOSITORY) private readonly repo: CandleRepository,
+    private readonly emptyRanges: ChartEmptyRangeService,
   ) {}
 
   async run(request: ChartCatchupRequest): Promise<ChartCatchupResult> {
@@ -53,6 +55,10 @@ export class ChartCatchupService {
         fromIso: request.fromIso,
         toIso: request.toIso,
       });
+
+      if (rows.length === 0) {
+        await this.emptyRanges.recordEmpty(request, 'transient');
+      }
 
       for (const row of rows) {
         const r = await this.repo.upsertClosed(row);

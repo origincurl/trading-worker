@@ -35,12 +35,12 @@ export class CollectorStatusService implements RoleStatusProvider {
       universe_size: this.universe.size(),
       observed_admin_count: this.universe.observedAdminCount(),
       observed_fe_count: this.universe.observedFeCount(),
-      active_subscriptions: this.subscriber.subscribedSymbols().length,
+      active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
     };
   }
 
   getStatus(): RoleStatus {
-    const subscribed = this.subscriber.subscribedSymbols().length;
+    const subscribed = this.refreshUniverse.actualSubscriptionCount();
     const last = this.tickService.lastTickAt();
     const lastOb = this.orderbookService.lastSnapshotAt();
     const lastClose = this.candleClose.lastClosedAt();

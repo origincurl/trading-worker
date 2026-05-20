@@ -7,23 +7,20 @@ import type {
 } from '@external/brokerage/vendor/brokerage.vendor';
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
-import { ETF_REPOSITORY } from '@shared/persistence/etf/etf.token';
-import type { EtfRepository } from '@shared/persistence/etf/etf.repository';
-import { STOCK_REPOSITORY } from '@shared/persistence/stock/stock.token';
-import type { StockRepository } from '@shared/persistence/stock/stock.repository';
 import { UniverseService } from '@roles/collector/service/universe.service';
 import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
 
-// FE-observation refcnt HASH key. BE WS gateway maintains it (HINCRBY on
+// FE-observation refcnt HASH keys. BE WS gateway maintains them (HINCRBY on
 // subscribe / HDEL on count→0). Worker reads HKEYS — values are
 // reference counts, not used here.
-const FE_OBSERVATION_HASH = 'fe:observation:stocks:refcnt';
+const FE_OBSERVATION_STOCKS_HASH = 'fe:observation:stocks:refcnt';
+const FE_OBSERVATION_ETFS_HASH = 'fe:observation:etfs:refcnt';
 
-// Pulls the combined observation universe from DB (admin-observed stocks
-// + ETFs) and Redis (FE-observed) and re-applies it to the in-memory
-// UniverseService. Failure on any fetch is tolerated — we keep the
-// previous snapshot so a transient DB/Redis hiccup never tears down
-// vendor WS subscriptions.
+// Pulls the live observation universe from Redis (FE-observed now; strategy
+// demand joins this path in Phase 4) and re-applies it to the in-memory
+// UniverseService. Admin watchlists do not directly subscribe broker WS.
+// Failure on any fetch is tolerated — we keep the previous snapshot so a
+// transient Redis hiccup never tears down vendor WS subscriptions.
 @Injectable()
 export class RefreshUniverseUsecase {
   private readonly logger = new Logger(RefreshUniverseUsecase.name);
@@ -32,21 +29,15 @@ export class RefreshUniverseUsecase {
 
   private _lastRefreshOk = false;
 
+  private actualSymbols: readonly string[] = [];
+
   constructor(
     @Inject(COLLECTOR_CONFIG) private readonly collectorConfig: CollectorConfig,
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
-    @Inject(STOCK_REPOSITORY) private readonly stockRepo: StockRepository,
-    @Inject(ETF_REPOSITORY) private readonly etfRepo: EtfRepository,
     @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
     private readonly universe: UniverseService,
     private readonly planner: SubscriptionPlannerService,
-  ) {
-    // SubscriptionPlannerService is intentionally injected even though
-    // the refresh path currently re-subscribes the full target set —
-    // hardening will swap the gateway's bulk REG for a planner diff
-    // once the gateway exposes its current sub set.
-    void this.planner;
-  }
+  ) {}
 
   lastRefreshAt(): Date | null {
     return this._lastRefreshAt;
@@ -56,37 +47,17 @@ export class RefreshUniverseUsecase {
     return this._lastRefreshOk;
   }
 
+  actualSubscriptionCount(): number {
+    return this.actualSymbols.length;
+  }
+
   async execute(): Promise<void> {
     this._lastRefreshAt = new Date();
 
-    let adminStocks: ObservedSymbolModel[];
-    let adminEtfs: ObservedSymbolModel[];
     let feSymbols: ObservedSymbolModel[];
 
     try {
-      const [stockRows, etfRows, feKeys] = await Promise.all([
-        this.stockRepo.findObservedStocks(),
-        this.etfRepo.findObservedEtfs(),
-        this.readFeObservedSymbols(),
-      ]);
-
-      adminStocks = stockRows.map((s) => ({
-        symbol: s.symbol,
-        source: 'ADMIN' as const,
-        instrumentType: 'STOCK' as const,
-      }));
-
-      adminEtfs = etfRows.map((e) => ({
-        symbol: e.symbol,
-        source: 'ADMIN' as const,
-        instrumentType: 'ETF' as const,
-      }));
-
-      feSymbols = feKeys.map((symbol) => ({
-        symbol,
-        source: 'FE' as const,
-        instrumentType: 'STOCK' as const,
-      }));
+      feSymbols = await this.readFeObservedSymbols();
     } catch (err) {
       this._lastRefreshOk = false;
 
@@ -97,7 +68,7 @@ export class RefreshUniverseUsecase {
       return;
     }
 
-    this.universe.apply(adminStocks, adminEtfs, feSymbols);
+    this.universe.apply([], [], feSymbols);
 
     this._lastRefreshOk = true;
 
@@ -113,25 +84,49 @@ export class RefreshUniverseUsecase {
 
     if (this.collectorConfig.subscribeOrderbook) kinds.push('orderbook');
 
-    if (target.length > 0) {
-      await this.gateway.subscribeMarketData({ symbols: [...target], kinds });
+    const plan = this.planner.plan(this.actualSymbols, target);
 
-      this.logger.log(`universe REG symbols=${target.length} kinds=[${kinds.join(',')}]`);
+    if (plan.remove.length > 0) {
+      await this.gateway.unsubscribeMarketData({ symbols: [...plan.remove], kinds });
+    }
+
+    if (plan.add.length > 0) {
+      await this.gateway.subscribeMarketData({ symbols: [...plan.add], kinds });
+    }
+
+    this.actualSymbols = [...target];
+
+    if (plan.add.length > 0 || plan.remove.length > 0) {
+      this.logger.log(
+        `universe reconcile desired=${target.length} add=${plan.add.length} remove=${plan.remove.length} kinds=[${kinds.join(',')}]`,
+      );
     }
   }
 
-  private async readFeObservedSymbols(): Promise<string[]> {
+  private async readFeObservedSymbols(): Promise<ObservedSymbolModel[]> {
     if (!this.redis) return [];
 
     try {
-      // HKEYS returns the symbol set. Refcnt values themselves are not
-      // needed — BE GC removes the key once count→0.
-      const keys = await this.redis.hkeys(FE_OBSERVATION_HASH);
+      const [stockKeys, etfKeys] = await Promise.all([
+        this.redis.hkeys(FE_OBSERVATION_STOCKS_HASH),
+        this.redis.hkeys(FE_OBSERVATION_ETFS_HASH),
+      ]);
 
-      return Array.isArray(keys) ? keys : [];
+      return [
+        ...(Array.isArray(stockKeys) ? stockKeys : []).map((symbol) => ({
+          symbol,
+          source: 'FE' as const,
+          instrumentType: 'STOCK' as const,
+        })),
+        ...(Array.isArray(etfKeys) ? etfKeys : []).map((symbol) => ({
+          symbol,
+          source: 'FE' as const,
+          instrumentType: 'ETF' as const,
+        })),
+      ];
     } catch (err) {
       this.logger.warn(
-        `redis hkeys ${FE_OBSERVATION_HASH} failed: ${err instanceof Error ? err.message : err}`,
+        `redis hkeys FE observation failed: ${err instanceof Error ? err.message : err}`,
       );
 
       return [];

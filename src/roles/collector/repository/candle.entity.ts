@@ -19,6 +19,12 @@ export class CandleEntity extends BaseEntity {
   @Column({ type: 'varchar', length: 16, nullable: true })
   market!: string | null;
 
+  @Column({ name: 'chart_source', type: 'varchar', length: 32, default: 'unknown' })
+  chartSource!: 'trade_tick_0B' | 'broker_chart_REST' | 'broker_chart_AL' | 'unknown';
+
+  @Column({ name: 'chart_market', type: 'varchar', length: 16, default: 'UNKNOWN' })
+  chartMarket!: 'KRW' | 'AL' | 'NXT' | 'UNKNOWN';
+
   @Column({ name: 'interval_type', type: 'varchar', length: 8 })
   intervalType!: '1m';
 

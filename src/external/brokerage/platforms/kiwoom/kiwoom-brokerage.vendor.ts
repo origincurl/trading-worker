@@ -1,14 +1,22 @@
 import { Logger } from '@nestjs/common';
 import { DomainError, IntegrationError, NotImplementedError } from '@common/error/domain.error';
+import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
 import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import {
+  MARKET_INDEX_CODES,
+  MARKET_INDEX_NAMES,
+  type MarketIndexSymbol,
+} from '@shared/event/market-index.event';
 import type { BrokerageVendorProfile } from '../../brokerage.token';
 import type {
   BrokerageVendor,
   CancelOrderInput,
   FetchChartCandlesInput,
+  FetchMarketIndexSnapshotsInput,
   GetAccountBalanceInput,
   GetPositionsInput,
   GetStockMasterListInput,
+  MarketIndexSnapshot,
   MarketDataFrameHandler,
   MarketDataFrameKind,
   MarketDataSubscription,
@@ -83,6 +91,9 @@ const DEFAULT_POST_LOGIN_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_RECONNECT_MAX_ATTEMPTS = 0; // 0 = unlimited
+const KST_OFFSET_MS = 9 * 3_600_000;
+
+type KiwoomMarketIndexCurrentResponseContract = Record<string, unknown>;
 
 // Endpoint category paths. Kiwoom REST groups apiIds by domain category.
 // TODO(kiwoom-spec): verify each category against current Kiwoom REST docs.
@@ -90,6 +101,7 @@ const PATH_ORDER = '/api/dostk/ordr';
 const PATH_ACCOUNT = '/api/dostk/acnt';
 const PATH_CHART = '/api/dostk/chart';
 const PATH_MARKET_COND = '/api/dostk/mrkcond';
+const PATH_SECTOR = '/api/dostk/sect';
 
 // apiId catalogue. Public Kiwoom REST values; flagged with TODO comments
 // where the mapping is uncertain.
@@ -102,6 +114,7 @@ const APIID_POSITIONS = 'kt00018';
 const APIID_CHART_MINUTE = 'ka10080';
 const APIID_CHART_DAILY = 'ka10081';
 const APIID_STOCK_MASTER = 'ka10099';
+const APIID_INDEX_CURRENT = 'ka20001';
 
 // Phase 6 market-data stream (collector-only) + Phase 6.8 auto-reconnect.
 // Phase 8: REST order paths and chart/master read paths wired against
@@ -323,8 +336,13 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       const isMinute = input.intervalType === '1m';
       const apiId = isMinute ? APIID_CHART_MINUTE : APIID_CHART_DAILY;
       const body: FetchChartCandlesRequestContract = isMinute
-        ? { stkCd: input.symbol, baseDt, tic_scope: '1' /* 1분봉 */ }
-        : { stkCd: input.symbol, baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
+        ? {
+            stk_cd: input.symbol,
+            base_dt: baseDt,
+            tic_scope: '1' /* 1분봉 */,
+            upd_stkpc_tp: '1' /* 수정주가반영 */,
+          }
+        : { stk_cd: input.symbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
 
       const response = await this.opts.apiClient.request<
         FetchChartCandlesRequestContract,
@@ -345,18 +363,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       const out: MarketCandleClosedPayload[] = [];
 
       for (const row of rows) {
-        const bucketStartMs = parseKiwoomCandleTs(row, isMinute);
+        const bucketStartMs = parseKiwoomCandleTs(row, isMinute, baseDt);
 
         if (bucketStartMs === null) continue;
 
         // Half-open [from, to) window.
         if (bucketStartMs < fromMs || bucketStartMs >= toMs) continue;
 
-        const open = parseNumberOrNull(row.op ?? row.open_pric);
-        const high = parseNumberOrNull(row.hg ?? row.high_pric);
-        const low = parseNumberOrNull(row.lw ?? row.low_pric);
-        const close = parseNumberOrNull(row.cp ?? row.cur_prc);
-        const volume = parseNumberOrNull(row.tradeVolume ?? row.trd_qty ?? row.cntr_qty);
+        const open = parseKiwoomPriceOrNull(row.op ?? row.open_pric);
+        const high = parseKiwoomPriceOrNull(row.hg ?? row.high_pric);
+        const low = parseKiwoomPriceOrNull(row.lw ?? row.low_pric);
+        const close = parseKiwoomPriceOrNull(row.cp ?? row.cur_prc);
+        const volume = parseKiwoomAbsoluteNumberOrNull(
+          row.tradeVolume ?? row.trde_qty ?? row.trd_qty ?? row.cntr_qty,
+        );
 
         if (open === null || high === null || low === null || close === null) continue;
 
@@ -373,6 +393,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           marketEnv: input.marketEnv,
           symbol: input.symbol,
           market: 'unknown',
+          chartSource: 'broker_chart_REST',
+          chartMarket: input.chartMarket ?? 'KRW',
           intervalType: '1m',
           bucketStart,
           bucketEnd,
@@ -446,6 +468,48 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         this.logger.warn(
           `getStockMasterList segment=${segment.marketCode} failed: ${err instanceof Error ? err.message : err}`,
         );
+      }
+    }
+
+    return out;
+  }
+
+  async fetchMarketIndexSnapshots(
+    input: FetchMarketIndexSnapshotsInput,
+  ): Promise<MarketIndexSnapshot[]> {
+    const marketEnv = input.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK';
+    const out: MarketIndexSnapshot[] = [];
+
+    for (const symbol of input.symbols) {
+      const indexCode = MARKET_INDEX_CODES[symbol];
+
+      try {
+        const response = await this.opts.apiClient.request<
+          { inds_cd: string; mrkt_tp: string },
+          KiwoomMarketIndexCurrentResponseContract
+        >({
+          apiId: APIID_INDEX_CURRENT,
+          endpointPath: PATH_SECTOR,
+          body: { inds_cd: indexCode, mrkt_tp: indexCode },
+        });
+        const raw = normalizeIndexResponse(response, symbol);
+
+        out.push({
+          provider: 'KIWOOM',
+          marketEnv,
+          symbol,
+          name: pickString(raw, ['inds_nm', 'ind_nm', 'stk_nm']) ?? MARKET_INDEX_NAMES[symbol],
+          lastUpdatedAt: new Date().toISOString(),
+          value: parseSignedNumberAbs(pickValue(raw, ['cur_prc', 'now_pric', 'prc', 'close_pric'])),
+          change: parseSignedNumberStrict(pickValue(raw, ['pred_pre', 'pre', 'change'])),
+          changePct: parseSignedNumberStrict(pickValue(raw, ['flu_rt', 'pre_rt', 'change_rt'])),
+          volume: parseSignedNumberAbs(pickValue(raw, ['acc_trde_qty', 'trde_qty', 'volume'])),
+          tradeValue: parseSignedNumberAbs(
+            pickValue(raw, ['acc_trde_prica', 'trde_prica', 'trade_value']),
+          ),
+        });
+      } catch (err) {
+        throw this.wrapVendorError(err, 'fetchMarketIndexSnapshots', { symbol });
       }
     }
 
@@ -962,6 +1026,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 const KIND_TO_REALTIME_TYPE: Record<MarketDataFrameKind, string> = {
   'trade-tick': '0B',
   orderbook: '0D',
+  'market-index': '0J',
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -996,6 +1061,87 @@ function parseNumberOrNull(input: string | number | undefined | null): number | 
   return Number.isFinite(n) ? n : null;
 }
 
+function parseKiwoomPriceOrNull(value: unknown): number | null {
+  // Kiwoom REST chart fields encode previous-day direction in the sign
+  // bit (`-274000` means price 274000, down vs previous day). KRX stock
+  // instruments trade at positive prices, so abs is the correct candle
+  // magnitude. Revisit this if expanding to products that can have
+  // negative prices.
+  const n = parseSignedNumber(value);
+
+  return n === null ? null : Math.abs(n);
+}
+
+function parseKiwoomAbsoluteNumberOrNull(value: unknown): number | null {
+  // Volumes are magnitudes for candle storage even when a vendor sends a
+  // signed representation.
+  const n = parseSignedNumber(value);
+
+  return n === null ? null : Math.abs(n);
+}
+
+function normalizeIndexResponse(
+  response: KiwoomMarketIndexCurrentResponseContract,
+  symbol: MarketIndexSymbol,
+): Record<string, unknown> {
+  const candidates = [
+    response,
+    firstObject(response.industry_current_price),
+    firstObject(response.inds_cur_prc),
+    firstObject(response.ind_cur_prc),
+    firstObject(response.output),
+    firstObject(response.list),
+  ];
+  const code = MARKET_INDEX_CODES[symbol];
+
+  return (
+    candidates.find(
+      (row) =>
+        row &&
+        (pickString(row, ['inds_cd', 'ind_cd', 'mrkt_tp']) === code ||
+          pickString(row, ['inds_nm', 'ind_nm', 'stk_nm']) === MARKET_INDEX_NAMES[symbol]),
+    ) ??
+    candidates.find(Boolean) ??
+    response
+  );
+}
+
+function firstObject(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    const first = value.find((item) => typeof item === 'object' && item !== null);
+
+    return first ? (first as Record<string, unknown>) : null;
+  }
+
+  if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
+
+  return null;
+}
+
+function pickValue(row: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
+  }
+
+  return null;
+}
+
+function pickString(row: Record<string, unknown>, keys: readonly string[]): string | null {
+  const value = pickValue(row, keys);
+
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function parseSignedNumberStrict(value: unknown): number | null {
+  return parseSignedNumber(value);
+}
+
+function parseSignedNumberAbs(value: unknown): number | null {
+  const n = parseSignedNumber(value);
+
+  return n === null ? null : Math.abs(n);
+}
+
 function toYyyyMmDd(iso: string): string {
   const d = new Date(iso);
 
@@ -1015,13 +1161,14 @@ function toYyyyMmDd(iso: string): string {
 function parseKiwoomCandleTs(
   row: KiwoomChartCandleRowContract,
   isMinute: boolean,
+  baseDt: string,
 ): number | null {
   if (isMinute) {
     const raw = row.cntr_tm ?? row.dt;
 
     if (!raw) return null;
 
-    // Accept YYYYMMDDHHmmss as the safe format.
+    // Kiwoom chart timestamps are KST exchange times. Persist buckets in UTC.
     if (raw.length === 14) {
       const y = Number(raw.slice(0, 4));
       const mo = Number(raw.slice(4, 6)) - 1;
@@ -1032,7 +1179,20 @@ function parseKiwoomCandleTs(
 
       if ([y, mo, d, h, mi, s].some((v) => Number.isNaN(v))) return null;
 
-      return Date.UTC(y, mo, d, h, mi, s);
+      return Date.UTC(y, mo, d, h, mi, s) - KST_OFFSET_MS;
+    }
+
+    if (raw.length === 6 && baseDt.length === 8) {
+      const y = Number(baseDt.slice(0, 4));
+      const mo = Number(baseDt.slice(4, 6)) - 1;
+      const d = Number(baseDt.slice(6, 8));
+      const h = Number(raw.slice(0, 2));
+      const mi = Number(raw.slice(2, 4));
+      const s = Number(raw.slice(4, 6));
+
+      if ([y, mo, d, h, mi, s].some((v) => Number.isNaN(v))) return null;
+
+      return Date.UTC(y, mo, d, h, mi, s) - KST_OFFSET_MS;
     }
 
     return null;
@@ -1048,7 +1208,7 @@ function parseKiwoomCandleTs(
 
   if ([y, mo, d].some((v) => Number.isNaN(v))) return null;
 
-  return Date.UTC(y, mo, d);
+  return Date.UTC(y, mo, d) - KST_OFFSET_MS;
 }
 
 function mapOrderResponseToAck(

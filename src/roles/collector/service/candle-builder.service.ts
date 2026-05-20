@@ -119,6 +119,8 @@ function openCandle(tick: MarketTickPayload, sourceTs: Date, bucketStart: Date):
     symbol: tick.symbol,
     marketEnv: tick.marketEnv,
     market: tick.market,
+    chartSource: 'trade_tick_0B',
+    chartMarket: 'KRW',
     bucketStart,
     bucketEnd: addMinutes(bucketStart, 1),
     open: price,

@@ -6,6 +6,7 @@ import {
   type OnApplicationShutdown,
 } from '@nestjs/common';
 import { COLLECTOR_CONFIG, type CollectorConfig } from '@config/collector.config';
+import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
 import { shouldHandle } from '@common/util/shard';
 import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
@@ -15,6 +16,8 @@ import type {
 } from '@external/brokerage/vendor/brokerage.vendor';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
+import { MARKET_INDEX_CODES } from '@shared/event/market-index.event';
+import { resolveMarketRealtimeProfile } from '@roles/collector/market-realtime-profile';
 
 // Connects to Kiwoom WS (LOGIN included), then:
 //   1. REGs the optional bootstrap symbol set (dev convenience)
@@ -33,6 +36,7 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
   constructor(
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(COLLECTOR_CONFIG) private readonly config: CollectorConfig,
+    @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
     private readonly usecase: IngestTickUsecase,
     private readonly refreshUniverse: RefreshUniverseUsecase,
@@ -62,9 +66,16 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
 
       this._connected = true;
 
-      const kinds: MarketDataFrameKind[] = ['trade-tick'];
+      const profile = resolveMarketRealtimeProfile(this.kiwoom.marketEnv);
+      const kinds: MarketDataFrameKind[] = [...profile.bootstrapKinds];
 
       if (this.config.subscribeOrderbook) kinds.push('orderbook');
+
+      if (!profile.chartLiveSourceSupported) {
+        this.logger.warn(
+          `chart live source ${profile.chartLiveSource} is not implemented yet; using fallback ${profile.fallbackChartLiveSource ?? 'none'} kinds=[${kinds.join(',')}]`,
+        );
+      }
 
       if (bootstrap.length > 0) {
         await this.gateway.subscribeMarketData({ symbols: bootstrap, kinds });
@@ -76,6 +87,16 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
         );
       } else {
         this.logger.log('no bootstrap symbols — waiting on universe lease');
+      }
+
+      if (this.config.subscribeMarketIndex) {
+        const indexCodes = Object.values(MARKET_INDEX_CODES);
+
+        await this.gateway.subscribeMarketData({ symbols: indexCodes, kinds: ['market-index'] });
+
+        this.logger.log(
+          `market index subscribed: symbols=${indexCodes.join(',')} kinds=[market-index]`,
+        );
       }
 
       // Phase 6.7: prime universe lease once after WS is up so BE-approved

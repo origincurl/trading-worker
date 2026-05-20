@@ -8,12 +8,16 @@ export const MARKET_CANDLE_CLOSED_SCHEMA_VERSION = 1;
 export const MARKET_CANDLE_CLOSED_STREAM = 'market.candle.closed';
 
 export type CandleInterval = '1m';
+export type CandleChartSource = 'trade_tick_0B' | 'broker_chart_REST' | 'broker_chart_AL' | 'unknown';
+export type CandleChartMarket = 'KRW' | 'AL' | 'NXT' | 'UNKNOWN';
 
 export interface MarketCandleClosedPayload {
   readonly provider: MarketTickProvider;
   readonly marketEnv: 'mock' | 'production';
   readonly symbol: string;
   readonly market: MarketTickMarket;
+  readonly chartSource: CandleChartSource;
+  readonly chartMarket: CandleChartMarket;
   readonly intervalType: CandleInterval;
   readonly bucketStart: string;
   readonly bucketEnd: string;

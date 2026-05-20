@@ -1,8 +1,10 @@
 import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
 import { parseHhmmssToDate } from '@common/util/kiwoom-time-parse';
 import type { KiwoomMarketEnv } from '@config/kiwoom.config';
+import type { MarketIndexPayload } from '@shared/event/market-index.event';
 import type { MarketOrderbookPayload } from '@shared/event/market-orderbook.event';
 import type { MarketTickPayload } from '@shared/event/market-tick.event';
+import { parseMarketIndex0J } from './kiwoom-market-index.event-mapper';
 import { parseOrderbook0D } from './kiwoom-orderbook.event-mapper';
 
 // Single entry inside a Kiwoom REAL frame's `data` array. FID dictionary
@@ -22,6 +24,7 @@ export type TickParseWarning =
 export type DispatchResult =
   | { kind: 'tick'; tick: MarketTickPayload }
   | { kind: 'orderbook'; orderbook: MarketOrderbookPayload }
+  | { kind: 'market-index'; marketIndex: MarketIndexPayload }
   | { kind: 'ignored'; reason: string }
   | { kind: 'dead-letter'; realtimeType: string | null; symbol: string | null; reason: string };
 
@@ -105,6 +108,14 @@ function dispatchEntry(entry: KiwoomRealEntry, ctx: DispatchContext): DispatchRe
 
       return result.kind === 'orderbook'
         ? { kind: 'orderbook', orderbook: result.orderbook }
+        : result;
+    }
+
+    case '0J': {
+      const result = parseMarketIndex0J(entry, ctx);
+
+      return result.kind === 'market-index'
+        ? { kind: 'market-index', marketIndex: result.marketIndex }
         : result;
     }
 

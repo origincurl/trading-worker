@@ -57,6 +57,7 @@ export class CollectorStatusService implements RoleStatusProvider {
 
     const detail =
       `subscribed=${subscribed} ticks=${stats.ticks} orderbooks=${stats.orderbooks} ` +
+      `marketIndexes=${stats.marketIndexes} ` +
       `openBuckets=${openBuckets} closedCandles=${this.candleClose.closedCount()} ` +
       `deadLetters=${stats.deadLetters} parseWarnings=${stats.parseWarnings} ` +
       `rejections=[${rejections}] ` +

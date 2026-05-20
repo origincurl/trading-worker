@@ -19,6 +19,11 @@ export class RedisConfigDto {
 
   @Type(() => Number)
   @IsInt()
+  @Min(30)
+  REDIS_MARKET_SNAPSHOT_TTL_SEC: number = 600;
+
+  @Type(() => Number)
+  @IsInt()
   @Min(1)
   REDIS_HEARTBEAT_TTL_SEC: number = 30;
 
@@ -32,6 +37,7 @@ export interface RedisConfig {
   readonly url?: string;
   readonly keyPrefix: string;
   readonly latestTtlSec: number;
+  readonly marketSnapshotTtlSec: number;
   readonly heartbeatTtlSec: number;
   readonly heartbeatIntervalSec: number;
 }
@@ -43,6 +49,7 @@ export function loadRedisConfig(env: NodeJS.ProcessEnv): RedisConfig {
       REDIS_URL: env.REDIS_URL?.trim() || undefined,
       REDIS_KEY_PREFIX: env.REDIS_KEY_PREFIX,
       REDIS_LATEST_TTL_SEC: env.REDIS_LATEST_TTL_SEC,
+      REDIS_MARKET_SNAPSHOT_TTL_SEC: env.REDIS_MARKET_SNAPSHOT_TTL_SEC,
       REDIS_HEARTBEAT_TTL_SEC: env.REDIS_HEARTBEAT_TTL_SEC,
       REDIS_HEARTBEAT_INTERVAL_SEC: env.REDIS_HEARTBEAT_INTERVAL_SEC,
     },
@@ -67,6 +74,7 @@ export function loadRedisConfig(env: NodeJS.ProcessEnv): RedisConfig {
     url: dto.REDIS_URL,
     keyPrefix: dto.REDIS_KEY_PREFIX,
     latestTtlSec: dto.REDIS_LATEST_TTL_SEC,
+    marketSnapshotTtlSec: dto.REDIS_MARKET_SNAPSHOT_TTL_SEC,
     heartbeatTtlSec: dto.REDIS_HEARTBEAT_TTL_SEC,
     heartbeatIntervalSec: dto.REDIS_HEARTBEAT_INTERVAL_SEC,
   };

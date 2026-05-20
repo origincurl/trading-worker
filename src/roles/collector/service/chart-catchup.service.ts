@@ -5,7 +5,10 @@ import {
   CANDLE_REPOSITORY,
   type CandleRepository,
 } from '@roles/collector/repository/candle.repository';
-import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import type {
+  CandleChartMarket,
+  MarketCandleClosedPayload,
+} from '@shared/event/market-candle-closed.event';
 
 // Phase E: actual catchup execution body — vendor fetch + candle upsert.
 // Consolidates what used to live in process-chart-catchup-lease.usecase.
@@ -15,6 +18,7 @@ export interface ChartCatchupRequest {
   readonly requestId: string;
   readonly marketEnv: 'mock' | 'production';
   readonly symbol: string;
+  readonly chartMarket?: CandleChartMarket;
   readonly intervalType: '1m' | '1d';
   readonly fromIso: string;
   readonly toIso: string;
@@ -44,6 +48,7 @@ export class ChartCatchupService {
       const rows: MarketCandleClosedPayload[] = await this.gateway.fetchChartCandles({
         symbol: request.symbol,
         marketEnv: request.marketEnv,
+        chartMarket: request.chartMarket,
         intervalType: request.intervalType,
         fromIso: request.fromIso,
         toIso: request.toIso,

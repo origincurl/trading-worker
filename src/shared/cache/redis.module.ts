@@ -12,6 +12,7 @@ import { Redis, type RedisOptions } from 'ioredis';
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 import { HeartbeatWriter } from './heartbeat.writer';
 import { LatestPriceWriter } from './latest-price.writer';
+import { MarketSnapshotWriter } from './market-snapshot.writer';
 import { RedisKeyBuilder } from './redis-key.builder';
 import { REDIS_CLIENT, REDIS_SUBSCRIBER, type RedisClientToken } from './redis.tokens';
 
@@ -48,9 +49,17 @@ const redisSubscriberProvider: Provider = {
     redisSubscriberProvider,
     RedisKeyBuilder,
     LatestPriceWriter,
+    MarketSnapshotWriter,
     HeartbeatWriter,
   ],
-  exports: [REDIS_CLIENT, REDIS_SUBSCRIBER, RedisKeyBuilder, LatestPriceWriter, HeartbeatWriter],
+  exports: [
+    REDIS_CLIENT,
+    REDIS_SUBSCRIBER,
+    RedisKeyBuilder,
+    LatestPriceWriter,
+    MarketSnapshotWriter,
+    HeartbeatWriter,
+  ],
 })
 export class RedisModule implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RedisModule.name);

@@ -51,6 +51,48 @@ describe('dispatchKiwoomFrame', () => {
     expect(result.tick.parseWarnings).toEqual([]);
   });
 
+  it('parses a 0J market index frame into an index payload', () => {
+    const frame = {
+      trnm: 'REAL',
+      data: [
+        {
+          type: '0J',
+          item: '001',
+          values: {
+            '20': '140258',
+            '10': '+2743.20',
+            '11': '-12.30',
+            '12': '-0.45',
+            '13': '123456789',
+            '14': '987654321000',
+          },
+        },
+      ],
+    };
+
+    const results = dispatchKiwoomFrame(frame, ctx);
+
+    expect(results).toHaveLength(1);
+
+    const result = results[0];
+
+    expect(result.kind).toBe('market-index');
+
+    if (result.kind !== 'market-index') return;
+
+    expect(result.marketIndex).toMatchObject({
+      provider: 'KIWOOM',
+      marketEnv: 'MOCK',
+      symbol: 'KOSPI',
+      name: 'KOSPI',
+      value: 2743.2,
+      change: -12.3,
+      changePct: -0.45,
+      volume: 123456789,
+      tradeValue: 987654321000,
+    });
+  });
+
   it('flags missing price as a parseWarning instead of failing', () => {
     const frame = {
       trnm: 'REAL',

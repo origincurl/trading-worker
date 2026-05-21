@@ -256,6 +256,7 @@ export class KiwoomApiClient {
     if (input.httpStatus === 401 || input.httpStatus === 403) {
       await this.opts.collectorRuntimeState?.markAuthFailed({
         credentialId: credential.credentialId,
+        source: 'REST',
         reason,
       });
     }
@@ -285,6 +286,7 @@ export class KiwoomApiClient {
     if (looksAuthFailed(input.returnCode, input.returnMsg)) {
       await this.opts.collectorRuntimeState?.markAuthFailed({
         credentialId: credential.credentialId,
+        source: 'REST',
         reason,
       });
     }

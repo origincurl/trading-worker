@@ -1,6 +1,7 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { redactPotentialSecrets } from '@common/util/redact.util';
 import {
   CollectorCredentialLimitPolicyEntity,
@@ -81,6 +82,7 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
       await this.ensureStateRow(input.credentialId);
 
       await this.updateRecoverableState(input.credentialId, {
+        endpoint: 'REST',
         status: CollectorCredentialRuntimeStatus.RateLimited,
         cooldownUntil,
         lastRateLimitedAt: now,
@@ -90,15 +92,49 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
     });
   }
 
-  async markAuthFailed(input: { credentialId: number; reason?: string | null }): Promise<void> {
+  async markAuthFailed(input: {
+    credentialId: number;
+    source: 'REST' | 'WS' | 'TOKEN';
+    reason?: string | null;
+  }): Promise<void> {
     await this.safelyRecord('markAuthFailed', async () => {
       if (!this.stateRepo) return;
+
+      const now = new Date();
+      const sanitizedReason = redactPotentialSecrets(input.reason ?? null);
+      const endpoint = input.source === 'WS' ? 'WS' : 'REST';
+      const endpointState =
+        input.source === 'TOKEN'
+          ? {
+              restStatus: CollectorCredentialRuntimeStatus.AuthFailed,
+              restCooldownUntil: null,
+              restLastAuthFailedAt: now,
+              restLastErrorMessage: sanitizedReason,
+              wsStatus: CollectorCredentialRuntimeStatus.AuthFailed,
+              wsCooldownUntil: null,
+              wsLastAuthFailedAt: now,
+              wsLastErrorMessage: sanitizedReason,
+            }
+          : endpoint === 'REST'
+            ? {
+                restStatus: CollectorCredentialRuntimeStatus.AuthFailed,
+                restCooldownUntil: null,
+                restLastAuthFailedAt: now,
+                restLastErrorMessage: sanitizedReason,
+              }
+            : {
+                wsStatus: CollectorCredentialRuntimeStatus.AuthFailed,
+                wsCooldownUntil: null,
+                wsLastAuthFailedAt: now,
+                wsLastErrorMessage: sanitizedReason,
+              };
 
       await this.upsertState(input.credentialId, {
         status: CollectorCredentialRuntimeStatus.AuthFailed,
         cooldownUntil: null,
-        lastAuthFailedAt: new Date(),
-        lastErrorMessage: input.reason ?? null,
+        lastAuthFailedAt: now,
+        lastErrorMessage: sanitizedReason,
+        ...endpointState,
       });
     });
   }
@@ -115,6 +151,7 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
       await this.ensureStateRow(input.credentialId);
 
       await this.updateRecoverableState(input.credentialId, {
+        endpoint: 'WS',
         status: CollectorCredentialRuntimeStatus.WsLimited,
         cooldownUntil,
         lastWsLimitedAt: now,
@@ -134,18 +171,39 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
       if (clearableStatuses.length === 0) return;
 
       try {
-        await this.stateRepo
+        const query = this.stateRepo
           .createQueryBuilder()
           .update(CollectorCredentialRuntimeStateEntity)
+          .where('collector_credential_id = :credentialId', {
+            credentialId: input.credentialId,
+          });
+
+        if (input.source === 'WS') {
+          await query
+            .set({
+              status: CollectorCredentialRuntimeStatus.Active,
+              cooldownUntil: null,
+              lastErrorMessage: null,
+              wsStatus: CollectorCredentialRuntimeStatus.Active,
+              wsCooldownUntil: null,
+              wsLastErrorMessage: null,
+            })
+            .andWhere('ws_status IN (:...statuses)', { statuses: clearableStatuses })
+            .execute();
+
+          return;
+        }
+
+        await query
           .set({
             status: CollectorCredentialRuntimeStatus.Active,
             cooldownUntil: null,
             lastErrorMessage: null,
+            restStatus: CollectorCredentialRuntimeStatus.Active,
+            restCooldownUntil: null,
+            restLastErrorMessage: null,
           })
-          .where('collector_credential_id = :credentialId', {
-            credentialId: input.credentialId,
-          })
-          .andWhere('status IN (:...statuses)', { statuses: clearableStatuses })
+          .andWhere('rest_status IN (:...statuses)', { statuses: clearableStatuses })
           .execute();
       } catch (error) {
         if (isMissingLimitTable(error)) {
@@ -217,6 +275,8 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
         .values({
           collectorCredentialId: credentialId,
           status: CollectorCredentialRuntimeStatus.Active,
+          restStatus: CollectorCredentialRuntimeStatus.Active,
+          wsStatus: CollectorCredentialRuntimeStatus.Active,
         })
         .orIgnore()
         .execute();
@@ -234,6 +294,7 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
   private async updateRecoverableState(
     credentialId: number,
     input: {
+      endpoint: 'REST' | 'WS';
       status:
         | CollectorCredentialRuntimeStatus.RateLimited
         | CollectorCredentialRuntimeStatus.WsLimited;
@@ -246,28 +307,58 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
   ): Promise<void> {
     if (!this.stateRepo) return;
 
+    const sanitizedError =
+      input.lastErrorMessage === undefined
+        ? undefined
+        : redactPotentialSecrets(input.lastErrorMessage);
     const set: Partial<CollectorCredentialRuntimeStateEntity> = {
       status: input.status,
-      lastErrorMessage:
-        input.lastErrorMessage === undefined
-          ? undefined
-          : redactPotentialSecrets(input.lastErrorMessage),
+      lastErrorMessage: sanitizedError,
     };
-    if (input.lastRateLimitedAt) set.lastRateLimitedAt = input.lastRateLimitedAt;
-    if (input.lastRetryAfterMs !== undefined) set.lastRetryAfterMs = input.lastRetryAfterMs;
-    if (input.lastWsLimitedAt) set.lastWsLimitedAt = input.lastWsLimitedAt;
+    if (input.endpoint === 'REST') {
+      set.restStatus = input.status;
+      set.restLastErrorMessage = sanitizedError;
+      if (input.lastRateLimitedAt) {
+        set.lastRateLimitedAt = input.lastRateLimitedAt;
+        set.restLastRateLimitedAt = input.lastRateLimitedAt;
+      }
+      if (input.lastRetryAfterMs !== undefined) {
+        set.lastRetryAfterMs = input.lastRetryAfterMs;
+        set.restLastRetryAfterMs = input.lastRetryAfterMs;
+      }
+    } else {
+      set.wsStatus = input.status;
+      set.wsLastErrorMessage = sanitizedError;
+      if (input.lastWsLimitedAt) {
+        set.lastWsLimitedAt = input.lastWsLimitedAt;
+        set.wsLastLimitedAt = input.lastWsLimitedAt;
+      }
+    }
 
     try {
+      const cooldownColumn =
+        input.endpoint === 'REST' ? 'rest_cooldown_until' : 'ws_cooldown_until';
+      const statusColumn = input.endpoint === 'REST' ? 'rest_status' : 'ws_status';
+
+      const updateSet: QueryDeepPartialEntity<CollectorCredentialRuntimeStateEntity> = {
+        ...set,
+        cooldownUntil: () =>
+          "GREATEST(COALESCE(cooldown_until, '-infinity'::timestamp), :cooldownUntil)",
+      };
+      if (input.endpoint === 'REST') {
+        updateSet.restCooldownUntil = () =>
+          `GREATEST(COALESCE(${cooldownColumn}, '-infinity'::timestamp), :cooldownUntil)`;
+      } else {
+        updateSet.wsCooldownUntil = () =>
+          `GREATEST(COALESCE(${cooldownColumn}, '-infinity'::timestamp), :cooldownUntil)`;
+      }
+
       await this.stateRepo
         .createQueryBuilder()
         .update(CollectorCredentialRuntimeStateEntity)
-        .set({
-          ...set,
-          cooldownUntil: () =>
-            "GREATEST(COALESCE(cooldown_until, '-infinity'::timestamp), :cooldownUntil)",
-        })
+        .set(updateSet)
         .where('collector_credential_id = :credentialId', { credentialId })
-        .andWhere('status != :authFailed', {
+        .andWhere(`${statusColumn} != :authFailed`, {
           authFailed: CollectorCredentialRuntimeStatus.AuthFailed,
         })
         .setParameter('cooldownUntil', input.cooldownUntil)

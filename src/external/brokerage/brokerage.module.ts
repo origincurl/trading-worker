@@ -48,7 +48,11 @@ function buildKiwoomGateway(
     config.marketEnv === 'mock' ? MarketEnv.Mock : MarketEnv.Production;
 
   const collectorRestTokenSupplier = async (): Promise<KiwoomTokenResult> => {
-    const material = await source.selectCollectorCredential(Brokerage.Kiwoom, collectorMarketEnv());
+    const material = await source.selectCollectorCredential(
+      Brokerage.Kiwoom,
+      collectorMarketEnv(),
+      'REST',
+    );
 
     const token = await tokenCache.getAccessToken(material);
 
@@ -63,6 +67,7 @@ function buildKiwoomGateway(
       stickyCollectorWsMaterial = await source.selectCollectorCredential(
         Brokerage.Kiwoom,
         collectorMarketEnv(),
+        'WS',
       );
     }
 

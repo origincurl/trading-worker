@@ -51,14 +51,15 @@ export class CredentialSourceService {
   async selectCollectorCredential(
     brokerage: Brokerage,
     marketEnv: MarketEnv,
+    endpoint: 'REST' | 'WS' = 'REST',
   ): Promise<BrokerageCredentialMaterial> {
     const all = await this.collectorRepo.findActive(brokerage, marketEnv);
     const limitState = await this.collectorLimitRepo.findByCredentialIds(all.map((c) => c.id));
     const now = Date.now();
     const evaluated = all.map((credential) => ({
       credential,
-      exclusionReason: this.collectorExclusionReason(credential.id, limitState, now),
-      priority: this.collectorPriority(credential.id, limitState),
+      exclusionReason: this.collectorExclusionReason(credential.id, limitState, now, endpoint),
+      priority: this.collectorPriority(credential.id, limitState, endpoint),
     }));
     const eligibleItems = evaluated.filter((item) => item.exclusionReason === null);
     const bestPriority = Math.min(...eligibleItems.map((item) => item.priority));
@@ -112,6 +113,7 @@ export class CredentialSourceService {
     credentialId: number,
     limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
     now: number,
+    endpoint: 'REST' | 'WS',
   ): string | null {
     if (this.cooldown.isOnCooldown(credentialId)) return 'IN_MEMORY_COOLDOWN';
 
@@ -120,10 +122,12 @@ export class CredentialSourceService {
 
     const state = limitState.states.get(credentialId);
     if (!state) return null;
-    if (state.cooldownUntil && state.cooldownUntil.getTime() > now) {
+    const cooldownUntil = endpoint === 'REST' ? state.restCooldownUntil : state.wsCooldownUntil;
+    const status = endpoint === 'REST' ? state.restStatus : state.wsStatus;
+    if (cooldownUntil && cooldownUntil.getTime() > now) {
       return 'COOLDOWN_PENDING';
     }
-    if (state.status === CollectorCredentialRuntimeStatus.AuthFailed) return 'AUTH_FAILED';
+    if (status === CollectorCredentialRuntimeStatus.AuthFailed) return 'AUTH_FAILED';
 
     return null;
   }
@@ -131,10 +135,12 @@ export class CredentialSourceService {
   private collectorPriority(
     credentialId: number,
     limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
+    endpoint: 'REST' | 'WS',
   ): number {
     const state = limitState.states.get(credentialId);
     if (!state) return 0;
-    if (state.status === CollectorCredentialRuntimeStatus.Active) return 0;
+    const status = endpoint === 'REST' ? state.restStatus : state.wsStatus;
+    if (status === CollectorCredentialRuntimeStatus.Active) return 0;
 
     return 1;
   }

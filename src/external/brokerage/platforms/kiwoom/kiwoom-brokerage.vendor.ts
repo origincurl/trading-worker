@@ -102,7 +102,6 @@ type KiwoomMarketIndexCurrentResponseContract = Record<string, unknown>;
 const PATH_ORDER = '/api/dostk/ordr';
 const PATH_ACCOUNT = '/api/dostk/acnt';
 const PATH_CHART = '/api/dostk/chart';
-const PATH_MARKET_COND = '/api/dostk/mrkcond';
 const PATH_SECTOR = '/api/dostk/sect';
 const PATH_STOCK_INFO = '/api/dostk/stkinfo';
 
@@ -1064,6 +1063,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     await this.opts.collectorRuntimeState?.markAuthFailed({
       credentialId: credential.credentialId,
+      source: 'WS',
       reason: `WS auth failed: ${err instanceof Error ? err.message : String(err)}`,
     });
   }
@@ -1140,14 +1140,6 @@ function parseNumberOr0(input: string | number | undefined | null): number {
   const n = typeof input === 'number' ? input : parseFloat(input);
 
   return Number.isFinite(n) ? n : 0;
-}
-
-function parseNumberOrNull(input: string | number | undefined | null): number | null {
-  if (input === null || input === undefined || input === '') return null;
-
-  const n = typeof input === 'number' ? input : parseFloat(input);
-
-  return Number.isFinite(n) ? n : null;
 }
 
 function parseKiwoomPriceOrNull(value: unknown): number | null {

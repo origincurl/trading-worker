@@ -137,6 +137,7 @@ export class AccessTokenCacheService {
 
     await this.collectorRuntimeState.markAuthFailed({
       credentialId: material.credentialId,
+      source: 'TOKEN',
       reason: err instanceof Error ? err.message : String(err),
     });
   }

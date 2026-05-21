@@ -96,6 +96,51 @@ export class CollectorCredentialRuntimeStateEntity {
   @Column({ name: 'last_error_message', type: 'text', nullable: true })
   lastErrorMessage!: string | null;
 
+  @Column({
+    name: 'rest_status',
+    type: 'enum',
+    enum: CollectorCredentialRuntimeStatus,
+    enumName: 'collector_credential_runtime_status',
+    default: CollectorCredentialRuntimeStatus.Active,
+  })
+  restStatus!: CollectorCredentialRuntimeStatus;
+
+  @Column({ name: 'rest_cooldown_until', type: 'timestamp', nullable: true })
+  restCooldownUntil!: Date | null;
+
+  @Column({ name: 'rest_last_rate_limited_at', type: 'timestamp', nullable: true })
+  restLastRateLimitedAt!: Date | null;
+
+  @Column({ name: 'rest_last_retry_after_ms', type: 'int', nullable: true })
+  restLastRetryAfterMs!: number | null;
+
+  @Column({ name: 'rest_last_auth_failed_at', type: 'timestamp', nullable: true })
+  restLastAuthFailedAt!: Date | null;
+
+  @Column({ name: 'rest_last_error_message', type: 'text', nullable: true })
+  restLastErrorMessage!: string | null;
+
+  @Column({
+    name: 'ws_status',
+    type: 'enum',
+    enum: CollectorCredentialRuntimeStatus,
+    enumName: 'collector_credential_runtime_status',
+    default: CollectorCredentialRuntimeStatus.Active,
+  })
+  wsStatus!: CollectorCredentialRuntimeStatus;
+
+  @Column({ name: 'ws_cooldown_until', type: 'timestamp', nullable: true })
+  wsCooldownUntil!: Date | null;
+
+  @Column({ name: 'ws_last_limited_at', type: 'timestamp', nullable: true })
+  wsLastLimitedAt!: Date | null;
+
+  @Column({ name: 'ws_last_auth_failed_at', type: 'timestamp', nullable: true })
+  wsLastAuthFailedAt!: Date | null;
+
+  @Column({ name: 'ws_last_error_message', type: 'text', nullable: true })
+  wsLastErrorMessage!: string | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamp' })
   createdAt!: Date;
 

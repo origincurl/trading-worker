@@ -17,7 +17,11 @@ export interface CollectorCredentialLimitRepository {
     reason?: string | null;
   }): Promise<void>;
 
-  markAuthFailed(input: { credentialId: number; reason?: string | null }): Promise<void>;
+  markAuthFailed(input: {
+    credentialId: number;
+    source: 'REST' | 'WS' | 'TOKEN';
+    reason?: string | null;
+  }): Promise<void>;
 
   markWsLimited(input: { credentialId: number; reason?: string | null }): Promise<void>;
 

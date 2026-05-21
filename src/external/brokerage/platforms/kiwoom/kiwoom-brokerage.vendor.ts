@@ -814,7 +814,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private routeFrame(parsed: unknown): void {
     const trnm = isPlainObject(parsed) ? parsed.trnm : null;
 
-    if (trnm === 'LOGIN' || trnm === 'PING' || trnm === 'REG' || trnm === 'REMOVE') return;
+    if (trnm === 'PING') {
+      void this.opts.wsClient.send({ trnm: 'PING' }).catch((err) => {
+        this.logger.warn(`PING ack failed: ${err instanceof Error ? err.message : err}`);
+      });
+
+      return;
+    }
+
+    if (trnm === 'LOGIN' || trnm === 'REG' || trnm === 'REMOVE') return;
 
     this.frameHandler?.(parsed);
   }

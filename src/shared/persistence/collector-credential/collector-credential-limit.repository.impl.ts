@@ -46,6 +46,7 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
       if (isMissingLimitTable(error)) {
         if (!this.hasLoggedMissingTables) {
           this.hasLoggedMissingTables = true;
+
           this.logger.warn(
             'collector credential limit tables missing; selector falling back to in-memory cooldown only',
           );
@@ -74,11 +75,15 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
       const retryAfterMs = normalizeNonNegativeInt(input.retryAfterMs);
       const defaultCooldownMs = cooldownFloorMs(policy?.cooldownDefaultMs);
       const cooldownMs = Math.max(retryAfterMs ?? 0, defaultCooldownMs);
+      const now = new Date();
+      const cooldownUntil = new Date(now.getTime() + cooldownMs);
 
-      await this.upsertState(input.credentialId, {
+      await this.ensureStateRow(input.credentialId);
+
+      await this.updateRecoverableState(input.credentialId, {
         status: CollectorCredentialRuntimeStatus.RateLimited,
-        cooldownUntil: new Date(Date.now() + cooldownMs),
-        lastRateLimitedAt: new Date(),
+        cooldownUntil,
+        lastRateLimitedAt: now,
         lastRetryAfterMs: retryAfterMs,
         lastErrorMessage: input.reason ?? null,
       });
@@ -104,11 +109,15 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
 
       const policy = await this.findPolicy(input.credentialId);
       const cooldownMs = cooldownFloorMs(policy?.cooldownDefaultMs);
+      const now = new Date();
+      const cooldownUntil = new Date(now.getTime() + cooldownMs);
 
-      await this.upsertState(input.credentialId, {
+      await this.ensureStateRow(input.credentialId);
+
+      await this.updateRecoverableState(input.credentialId, {
         status: CollectorCredentialRuntimeStatus.WsLimited,
-        cooldownUntil: new Date(Date.now() + cooldownMs),
-        lastWsLimitedAt: new Date(),
+        cooldownUntil,
+        lastWsLimitedAt: now,
         lastErrorMessage: input.reason ?? null,
       });
     });
@@ -197,10 +206,88 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
     }
   }
 
+  private async ensureStateRow(credentialId: number): Promise<void> {
+    if (!this.stateRepo) return;
+
+    try {
+      await this.stateRepo
+        .createQueryBuilder()
+        .insert()
+        .into(CollectorCredentialRuntimeStateEntity)
+        .values({
+          collectorCredentialId: credentialId,
+          status: CollectorCredentialRuntimeStatus.Active,
+        })
+        .orIgnore()
+        .execute();
+    } catch (error) {
+      if (isMissingLimitTable(error)) {
+        this.logMissingTablesOnce();
+
+        return;
+      }
+
+      throw error;
+    }
+  }
+
+  private async updateRecoverableState(
+    credentialId: number,
+    input: {
+      status:
+        | CollectorCredentialRuntimeStatus.RateLimited
+        | CollectorCredentialRuntimeStatus.WsLimited;
+      cooldownUntil: Date;
+      lastRateLimitedAt?: Date;
+      lastRetryAfterMs?: number | null;
+      lastWsLimitedAt?: Date;
+      lastErrorMessage?: string | null;
+    },
+  ): Promise<void> {
+    if (!this.stateRepo) return;
+
+    const set: Partial<CollectorCredentialRuntimeStateEntity> = {
+      status: input.status,
+      lastErrorMessage:
+        input.lastErrorMessage === undefined
+          ? undefined
+          : redactPotentialSecrets(input.lastErrorMessage),
+    };
+    if (input.lastRateLimitedAt) set.lastRateLimitedAt = input.lastRateLimitedAt;
+    if (input.lastRetryAfterMs !== undefined) set.lastRetryAfterMs = input.lastRetryAfterMs;
+    if (input.lastWsLimitedAt) set.lastWsLimitedAt = input.lastWsLimitedAt;
+
+    try {
+      await this.stateRepo
+        .createQueryBuilder()
+        .update(CollectorCredentialRuntimeStateEntity)
+        .set({
+          ...set,
+          cooldownUntil: () =>
+            "GREATEST(COALESCE(cooldown_until, '-infinity'::timestamp), :cooldownUntil)",
+        })
+        .where('collector_credential_id = :credentialId', { credentialId })
+        .andWhere('status != :authFailed', {
+          authFailed: CollectorCredentialRuntimeStatus.AuthFailed,
+        })
+        .setParameter('cooldownUntil', input.cooldownUntil)
+        .execute();
+    } catch (error) {
+      if (isMissingLimitTable(error)) {
+        this.logMissingTablesOnce();
+
+        return;
+      }
+
+      throw error;
+    }
+  }
+
   private logMissingTablesOnce(): void {
     if (this.hasLoggedMissingTables) return;
 
     this.hasLoggedMissingTables = true;
+
     this.logger.warn(
       'collector credential limit tables missing; selector falling back to in-memory cooldown only',
     );

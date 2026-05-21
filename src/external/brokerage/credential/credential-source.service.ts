@@ -58,9 +58,12 @@ export class CredentialSourceService {
     const evaluated = all.map((credential) => ({
       credential,
       exclusionReason: this.collectorExclusionReason(credential.id, limitState, now),
+      priority: this.collectorPriority(credential.id, limitState),
     }));
-    const eligible = evaluated
-      .filter((item) => item.exclusionReason === null)
+    const eligibleItems = evaluated.filter((item) => item.exclusionReason === null);
+    const bestPriority = Math.min(...eligibleItems.map((item) => item.priority));
+    const eligible = eligibleItems
+      .filter((item) => item.priority === bestPriority)
       .map((item) => item.credential);
 
     if (eligible.length === 0) {
@@ -123,6 +126,17 @@ export class CredentialSourceService {
     if (state.status === CollectorCredentialRuntimeStatus.AuthFailed) return 'AUTH_FAILED';
 
     return null;
+  }
+
+  private collectorPriority(
+    credentialId: number,
+    limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
+  ): number {
+    const state = limitState.states.get(credentialId);
+    if (!state) return 0;
+    if (state.status === CollectorCredentialRuntimeStatus.Active) return 0;
+
+    return 1;
   }
 
   // Account-scoped pool. Used by tracker + executor — every call must
@@ -190,6 +204,7 @@ function exclusionCounts(reasons: readonly (string | null)[]): Record<string, nu
   return reasons.reduce<Record<string, number>>((acc, reason) => {
     if (!reason) return acc;
     acc[reason] = (acc[reason] ?? 0) + 1;
+
     return acc;
   }, {});
 }

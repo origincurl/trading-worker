@@ -16,6 +16,21 @@ import { SubscriptionPlannerService } from '@roles/collector/service/subscriptio
 const FE_OBSERVATION_STOCKS_HASH = 'fe:observation:stocks:refcnt';
 const FE_OBSERVATION_ETFS_HASH = 'fe:observation:etfs:refcnt';
 
+export interface SubscriptionDriftSnapshot {
+  readonly desiredNotActual: readonly string[];
+  readonly actualNotDesired: readonly string[];
+}
+
+export interface SubscriptionStateSnapshot {
+  readonly desired: readonly string[];
+  // Worker-local requested set after REG/REMOVE send completion. This is not
+  // broker-confirmed; sharding should introduce an effective/frame-backed axis.
+  readonly actual: readonly string[];
+  readonly drift: SubscriptionDriftSnapshot;
+  readonly lastReconcileAt: string | null;
+  readonly lastHintAt: string | null;
+}
+
 // Pulls the live observation universe from Redis (FE-observed now; strategy
 // demand joins this path in Phase 4) and re-applies it to the in-memory
 // UniverseService. Admin watchlists do not directly subscribe broker WS.
@@ -28,6 +43,12 @@ export class RefreshUniverseUsecase {
   private _lastRefreshAt: Date | null = null;
 
   private _lastRefreshOk = false;
+
+  private _lastReconcileAt: Date | null = null;
+
+  private _lastHintAt: Date | null = null;
+
+  private desiredSymbols: readonly string[] = [];
 
   private actualSymbols: readonly string[] = [];
 
@@ -49,6 +70,26 @@ export class RefreshUniverseUsecase {
 
   actualSubscriptionCount(): number {
     return this.actualSymbols.length;
+  }
+
+  recordHintReceived(at = new Date()): void {
+    this._lastHintAt = at;
+  }
+
+  subscriptionState(): SubscriptionStateSnapshot {
+    const desired = normalizeSymbols(this.desiredSymbols);
+    const actual = normalizeSymbols(this.actualSymbols);
+
+    return {
+      desired,
+      actual,
+      drift: {
+        desiredNotActual: difference(desired, actual),
+        actualNotDesired: difference(actual, desired),
+      },
+      lastReconcileAt: this._lastReconcileAt?.toISOString() ?? null,
+      lastHintAt: this._lastHintAt?.toISOString() ?? null,
+    };
   }
 
   async execute(): Promise<void> {
@@ -73,6 +114,7 @@ export class RefreshUniverseUsecase {
     this._lastRefreshOk = true;
 
     const target = this.universe.symbolList();
+    this.desiredSymbols = [...target];
 
     if (!this.gateway.isMarketDataStreamConnected()) {
       this.logger.warn('gateway not connected — universe REG deferred');
@@ -95,6 +137,7 @@ export class RefreshUniverseUsecase {
     }
 
     this.actualSymbols = [...target];
+    this._lastReconcileAt = new Date();
 
     if (plan.add.length > 0 || plan.remove.length > 0) {
       this.logger.log(
@@ -132,4 +175,14 @@ export class RefreshUniverseUsecase {
       return [];
     }
   }
+}
+
+function normalizeSymbols(symbols: readonly string[]): string[] {
+  return Array.from(new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))).sort();
+}
+
+function difference(left: readonly string[], right: readonly string[]): string[] {
+  const rightSet = new Set(right);
+
+  return left.filter((symbol) => !rightSet.has(symbol));
 }

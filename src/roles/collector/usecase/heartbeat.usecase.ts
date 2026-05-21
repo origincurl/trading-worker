@@ -18,7 +18,7 @@ export class HeartbeatUsecase {
   async execute(): Promise<void> {
     const metrics = this.status.getMetrics();
 
-    await this.writer.tick(metrics);
+    await this.writer.tick(metrics, { subscriptionState: this.status.getSubscriptionState() });
 
     const status = this.status.getStatus();
 

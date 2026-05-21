@@ -4,6 +4,7 @@ import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
 import { KiwoomTickSubscriber } from '@roles/collector/trigger/subscriber/kiwoom-tick.subscriber';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
+import type { SubscriptionStateSnapshot } from '@roles/collector/usecase/refresh-universe.usecase';
 import { CandleBuilderService } from './candle-builder.service';
 import { CandleCloseService } from './candle-close.service';
 import { MarketOrderbookService } from './market-orderbook.service';
@@ -38,6 +39,10 @@ export class CollectorStatusService implements RoleStatusProvider {
       active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
       ws_connected: this.subscriber.isConnected(),
     };
+  }
+
+  getSubscriptionState(): SubscriptionStateSnapshot {
+    return this.refreshUniverse.subscriptionState();
   }
 
   getStatus(): RoleStatus {

@@ -7,6 +7,7 @@ import {
   CredentialUsageService,
   type CredentialUsageSnapshot,
 } from '@external/brokerage/credential/credential-usage.service';
+import type { SubscriptionStateSnapshot } from '@roles/collector/usecase/refresh-universe.usecase';
 
 // Optional role-scoped metrics blob written into the heartbeat JSON.
 // Phase 9 collector writes universe_size / observed_admin_count /
@@ -21,6 +22,7 @@ export interface WorkerHeartbeatPayload {
   readonly shard?: { readonly index: number; readonly count: number };
   readonly metrics?: HeartbeatMetrics;
   readonly credentialUsage?: readonly CredentialUsageSnapshot[];
+  readonly subscriptionState?: SubscriptionStateSnapshot;
 }
 
 @Injectable()
@@ -36,7 +38,7 @@ export class HeartbeatWriter {
     @Optional() private readonly credentialUsage?: CredentialUsageService,
   ) {}
 
-  async tick(metrics?: HeartbeatMetrics): Promise<void> {
+  async tick(metrics?: HeartbeatMetrics, options?: { subscriptionState?: SubscriptionStateSnapshot }): Promise<void> {
     if (!this.client) {
       if (!this.warnedRedisDisabled) {
         this.logger.warn('Redis client is disabled; worker heartbeat will not be published');
@@ -56,6 +58,7 @@ export class HeartbeatWriter {
           : undefined,
       metrics: metrics ?? undefined,
       credentialUsage: this.credentialUsage?.snapshot(),
+      subscriptionState: options?.subscriptionState,
     };
     const value = JSON.stringify(payload);
 

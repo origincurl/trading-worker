@@ -59,6 +59,8 @@ export class UniverseRefreshHintSubscriber implements OnApplicationBootstrap, On
   }
 
   private scheduleRefresh(): void {
+    this.refreshUniverse.recordHintReceived();
+
     if (this.timer) return;
 
     this.timer = setTimeout(() => {

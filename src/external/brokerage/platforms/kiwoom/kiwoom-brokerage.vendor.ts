@@ -102,6 +102,7 @@ const PATH_ACCOUNT = '/api/dostk/acnt';
 const PATH_CHART = '/api/dostk/chart';
 const PATH_MARKET_COND = '/api/dostk/mrkcond';
 const PATH_SECTOR = '/api/dostk/sect';
+const PATH_STOCK_INFO = '/api/dostk/stkinfo';
 
 // apiId catalogue. Public Kiwoom REST values; flagged with TODO comments
 // where the mapping is uncertain.
@@ -424,50 +425,70 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   async getStockMasterList(input: GetStockMasterListInput): Promise<StockMasterEntry[]> {
     void input.marketEnv;
 
-    // Kiwoom requires one call per market segment. Three best-effort
-    // segment codes — see the TODO in the request contract.
-    const segments: ReadonlyArray<{ mrktTp: string; marketCode: StockMasterEntry['marketCode'] }> =
-      [
-        { mrktTp: '0', marketCode: 'KOSPI' },
-        { mrktTp: '10', marketCode: 'KOSDAQ' },
-        { mrktTp: '8', marketCode: 'KONEX' },
-      ];
+    // Kiwoom's own guide documents 001/101, while mock/examples in the wild
+    // often use 0/10. Try the documented code first, then the legacy alias.
+    const segments: ReadonlyArray<{
+      mrktTps: readonly string[];
+      marketCode: StockMasterEntry['marketCode'];
+    }> = [
+      { mrktTps: ['001', '0'], marketCode: 'KOSPI' },
+      { mrktTps: ['101', '10'], marketCode: 'KOSDAQ' },
+      { mrktTps: ['50'], marketCode: 'KONEX' },
+    ];
 
     const out: StockMasterEntry[] = [];
+    const seen = new Set<string>();
 
     for (const segment of segments) {
-      try {
-        const response = await this.opts.apiClient.request<
-          GetStockMasterListRequestContract,
-          GetStockMasterListResponseContract
-        >({
-          apiId: APIID_STOCK_MASTER,
-          endpointPath: PATH_MARKET_COND,
-          body: { mrktTp: segment.mrktTp },
-        });
+      let segmentRows = 0;
 
-        const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
-          response.list ?? response.stk_lst ?? response.mst_lst ?? [];
-
-        for (const row of rows) {
-          const symbol = row.code ?? row.stkCd ?? row.stk_cd;
-          const name = row.name ?? row.stkNm ?? row.stk_nm;
-
-          if (!symbol || !name) continue;
-
-          out.push({
-            symbol,
-            name,
-            marketCode: segment.marketCode,
-            currency: row.currency ?? 'KRW',
-            isinSymbol: row.isin ?? row.isinCd ?? row.isin_cd,
+      for (const mrktTp of segment.mrktTps) {
+        try {
+          const response = await this.opts.apiClient.request<
+            GetStockMasterListRequestContract,
+            GetStockMasterListResponseContract
+          >({
+            apiId: APIID_STOCK_MASTER,
+            endpointPath: PATH_STOCK_INFO,
+            body: { mrkt_tp: mrktTp },
           });
+
+          const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
+            response.list ?? response.stk_lst ?? response.mst_lst ?? [];
+
+          for (const row of rows) {
+            const symbol = row.code ?? row.stkCd ?? row.stk_cd;
+            const name = row.name ?? row.stkNm ?? row.stk_nm;
+
+            if (!symbol || !name) continue;
+
+            const key = `${segment.marketCode}:${symbol}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            out.push({
+              symbol,
+              name,
+              marketCode: segment.marketCode,
+              currency: row.currency ?? 'KRW',
+              isinSymbol: row.isin ?? row.isinCd ?? row.isin_cd,
+            });
+            segmentRows += 1;
+          }
+
+          if (segmentRows > 0) break;
+        } catch (err) {
+          // One market/code candidate failing shouldn't black-hole the whole sync.
+          this.logger.warn(
+            `getStockMasterList segment=${segment.marketCode} mrkt_tp=${mrktTp} failed: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
         }
-      } catch (err) {
-        // One market failing shouldn't black-hole the whole sync.
-        this.logger.warn(
-          `getStockMasterList segment=${segment.marketCode} failed: ${err instanceof Error ? err.message : err}`,
-        );
+      }
+
+      if (segmentRows === 0) {
+        this.logger.warn(`getStockMasterList segment=${segment.marketCode} returned no rows`);
       }
     }
 
@@ -875,6 +896,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         this.opts.profile,
         tokenResult.credential,
         this.subscriptions.size,
+        Array.from(this.subscriptions.keys()),
       );
     }
 
@@ -995,6 +1017,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       this.opts.profile,
       this.activeWsCredential,
       this.subscriptions.size,
+      Array.from(this.subscriptions.keys()),
     );
   }
 

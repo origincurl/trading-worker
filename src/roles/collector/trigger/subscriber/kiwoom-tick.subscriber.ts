@@ -40,7 +40,7 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
   ) {}
 
   isConnected(): boolean {
-    return this._connected;
+    return this._connected && this.gateway.isMarketDataStreamConnected();
   }
 
   subscribedSymbols(): readonly string[] {
@@ -103,7 +103,7 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
   }
 
   async onApplicationShutdown(): Promise<void> {
-    if (!this._connected) return;
+    if (!this._connected && !this.gateway.isMarketDataStreamConnected()) return;
 
     try {
       await this.gateway.disconnectMarketDataStream();

@@ -36,6 +36,7 @@ export class CollectorStatusService implements RoleStatusProvider {
       observed_admin_count: this.universe.observedAdminCount(),
       observed_fe_count: this.universe.observedFeCount(),
       active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
+      ws_connected: this.subscriber.isConnected(),
     };
   }
 

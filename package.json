@@ -18,7 +18,8 @@
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "migrate:run": "ts-node --transpile-only -r tsconfig-paths/register scripts/migrate.ts"
+    "migrate:run": "ts-node --transpile-only -r tsconfig-paths/register scripts/migrate.ts",
+    "probe:kiwoom-ws": "ts-node --transpile-only -r tsconfig-paths/register scripts/probe-kiwoom-ws-concurrency.ts"
   },
   "dependencies": {
     "@nestjs/bullmq": "^11.0.3",

@@ -10,6 +10,7 @@ import {
   type BrokerageVendorProfile,
 } from './brokerage.token';
 import { CredentialCooldownService } from './credential/credential-cooldown.service';
+import type { BrokerageCredentialMaterial } from './credential/brokerage-credential-material';
 import { CredentialSourceService } from './credential/credential-source.service';
 import { CredentialUsageService } from './credential/credential-usage.service';
 import { BrokerageVendorResolver } from './service/brokerage-vendor.resolver';
@@ -37,17 +38,14 @@ function buildKiwoomGateway(
   source: CredentialSourceService,
   usage: CredentialUsageService,
 ): KiwoomBrokerageVendor {
-  let cachedCredentialId: number | null = null;
+  let lastWsCredentialId: number | null = null;
+  let stickyCollectorWsMaterial: BrokerageCredentialMaterial | null = null;
 
-  const collectorTokenSupplier = async (): Promise<KiwoomTokenResult> => {
-    // Collector profile: resolve marketEnv from KIWOOM_MARKET_ENV. The
-    // lowercase value lives on KiwoomConfig; convert to the DB enum form.
-    const dbMarketEnv =
-      config.marketEnv === 'mock' ? MarketEnv.Mock : MarketEnv.Production;
+  const collectorMarketEnv = (): MarketEnv =>
+    config.marketEnv === 'mock' ? MarketEnv.Mock : MarketEnv.Production;
 
-    const material = await source.selectCollectorCredential(Brokerage.Kiwoom, dbMarketEnv);
-
-    cachedCredentialId = material.credentialId;
+  const collectorRestTokenSupplier = async (): Promise<KiwoomTokenResult> => {
+    const material = await source.selectCollectorCredential(Brokerage.Kiwoom, collectorMarketEnv());
 
     const token = await tokenCache.getAccessToken(material);
 
@@ -55,6 +53,30 @@ function buildKiwoomGateway(
       token,
       credential: { kind: 'collector', credentialId: material.credentialId },
     };
+  };
+
+  const collectorWsTokenSupplier = async (): Promise<KiwoomTokenResult> => {
+    if (!stickyCollectorWsMaterial) {
+      stickyCollectorWsMaterial = await source.selectCollectorCredential(Brokerage.Kiwoom, collectorMarketEnv());
+    }
+
+    const material = stickyCollectorWsMaterial;
+    lastWsCredentialId = material.credentialId;
+
+    try {
+      const token = await tokenCache.getAccessToken(material);
+
+      return {
+        token,
+        credential: { kind: 'collector', credentialId: material.credentialId },
+      };
+    } catch (err) {
+      if (stickyCollectorWsMaterial?.credentialId === material.credentialId) {
+        stickyCollectorWsMaterial = null;
+      }
+
+      throw err;
+    }
   };
 
   const executorTokenSupplier = async (): Promise<KiwoomTokenResult> => {
@@ -68,8 +90,6 @@ function buildKiwoomGateway(
   const accountTokenSupplier = async (accountId: number): Promise<KiwoomTokenResult> => {
     const material = await source.selectAccountCredential(accountId);
 
-    cachedCredentialId = material.credentialId;
-
     const token = await tokenCache.getAccessToken(material);
 
     return {
@@ -82,7 +102,8 @@ function buildKiwoomGateway(
     };
   };
 
-  const tokenSupplier = profile === 'collector' ? collectorTokenSupplier : executorTokenSupplier;
+  const apiTokenSupplier = profile === 'collector' ? collectorRestTokenSupplier : executorTokenSupplier;
+  const wsTokenSupplier = profile === 'collector' ? collectorWsTokenSupplier : executorTokenSupplier;
 
   const rateLimiter = new RateLimiter({
     name: `kiwoom.${profile}`,
@@ -95,7 +116,7 @@ function buildKiwoomGateway(
   const apiClient = new KiwoomApiClient({
     profile,
     restUrl: config.restUrl,
-    tokenSupplier,
+    tokenSupplier: apiTokenSupplier,
     rateLimiter,
     usage,
   });
@@ -103,23 +124,26 @@ function buildKiwoomGateway(
   const wsClient = new KiwoomWsClient({
     profile,
     wsUrl: config.wsUrl,
-    tokenSupplier,
+    tokenSupplier: wsTokenSupplier,
   });
 
   return new KiwoomBrokerageVendor({
     profile,
     apiClient,
     wsClient,
-    tokenSupplier,
+    tokenSupplier: wsTokenSupplier,
     accountTokenSupplier: profile === 'executor' ? accountTokenSupplier : undefined,
     usage,
     invalidateToken: () => {
-      // After repeated LOGIN failures the gateway calls this so the
-      // cached bundle for the credential most recently used by the
-      // supplier is dropped. cachedCredentialId is best-effort —
-      // concurrent suppliers can race, but a stale id at worst
-      // invalidates a different credential which will just re-issue.
-      if (cachedCredentialId !== null) tokenCache.invalidate(cachedCredentialId);
+      // After repeated LOGIN failures the gateway invalidates only the
+      // credential last used by the WS supplier. REST/account suppliers
+      // intentionally do not update this id.
+      if (lastWsCredentialId !== null) {
+        tokenCache.invalidate(lastWsCredentialId);
+        if (stickyCollectorWsMaterial?.credentialId === lastWsCredentialId) {
+          stickyCollectorWsMaterial = null;
+        }
+      }
     },
     reconnect: { enabled: true },
   });

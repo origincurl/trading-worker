@@ -171,21 +171,30 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
     `);
     await this.dataSource.query(`
       DO $$
+      DECLARE
+        existing_pkey text;
+        existing_pkey_def text;
+        desired_pkey_def text := 'PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)';
       BEGIN
-        IF EXISTS (
-          SELECT 1
-          FROM pg_constraint
-          WHERE conrelid = 'market_candles'::regclass
-            AND conname = 'market_candles_pkey'
-        ) THEN
-          ALTER TABLE market_candles DROP CONSTRAINT market_candles_pkey;
+        SELECT conname, pg_get_constraintdef(oid)
+        INTO existing_pkey, existing_pkey_def
+        FROM pg_constraint
+        WHERE conrelid = 'market_candles'::regclass
+          AND contype = 'p'
+        LIMIT 1;
+
+        IF existing_pkey_def = desired_pkey_def THEN
+          RETURN;
         END IF;
+
+        IF existing_pkey IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE market_candles DROP CONSTRAINT %I', existing_pkey);
+        END IF;
+
+        ALTER TABLE market_candles
+        ADD CONSTRAINT market_candles_pkey
+        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market);
       END $$;
-    `);
-    await this.dataSource.query(`
-      ALTER TABLE market_candles
-      ADD CONSTRAINT market_candles_pkey
-      PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)
     `);
     await this.dataSource.query(`
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT NOW()

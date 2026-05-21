@@ -59,6 +59,7 @@ import type {
   CredentialUsageContext,
   CredentialUsageService,
 } from '../../credential/credential-usage.service';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 
 export interface KiwoomBrokerageVendorOptions {
   readonly profile: BrokerageVendorProfile;
@@ -70,6 +71,7 @@ export interface KiwoomBrokerageVendorOptions {
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly accountTokenSupplier?: (accountId: number) => Promise<KiwoomTokenResult>;
   readonly usage?: CredentialUsageService;
+  readonly collectorRuntimeState?: CollectorCredentialLimitRepository;
   // Used by AccessTokenCacheService.invalidate when LOGIN keeps failing.
   // The supplier closure captures the credentialId — we surface a hook
   // here so the gateway can drop a cached token on auth rejection.
@@ -268,10 +270,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     );
   }
 
-  async placeOrderForAccount(
-    accountId: number,
-    input: PlaceOrderInput,
-  ): Promise<OrderAckModel> {
+  async placeOrderForAccount(accountId: number, input: PlaceOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'placeOrderForAccount');
 
     // NOTE: the worker-internal accountId PK is unused for the vendor wire
@@ -320,18 +319,13 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     );
   }
 
-  async modifyOrderForAccount(
-    accountId: number,
-    input: ModifyOrderInput,
-  ): Promise<OrderAckModel> {
+  async modifyOrderForAccount(accountId: number, input: ModifyOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'modifyOrderForAccount');
 
     return this.executeModifyOrder(input, this.accountTokenSupplier(accountId));
   }
 
-  async fetchChartCandles(
-    input: FetchChartCandlesInput,
-  ): Promise<MarketCandleClosedPayload[]> {
+  async fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]> {
     try {
       const baseDt = toYyyyMmDd(input.toIso);
       const isMinute = input.intervalType === '1m';
@@ -355,8 +349,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       });
 
       const rows = isMinute
-        ? response.stk_min_pole_chart_qry ?? []
-        : response.stk_dt_pole_chart_qry ?? [];
+        ? (response.stk_min_pole_chart_qry ?? [])
+        : (response.stk_dt_pole_chart_qry ?? []);
 
       const fromMs = Date.parse(input.fromIso);
       const toMs = Date.parse(input.toIso);
@@ -886,9 +880,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     const tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
     const ack = this.installLoginAckGate();
 
-    await this.opts.wsClient.send({ trnm: 'LOGIN', token: tokenResult.token });
+    try {
+      await this.opts.wsClient.send({ trnm: 'LOGIN', token: tokenResult.token });
 
-    await ack;
+      await ack;
+    } catch (err) {
+      await this.recordWsLoginFailure(err, tokenResult.credential);
+
+      throw err;
+    }
 
     if (
       this.activeWsCredential &&
@@ -900,6 +900,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     this.activeWsCredential = tokenResult.credential;
     if (tokenResult.credential) {
+      if (this.opts.profile === 'collector' && tokenResult.credential.kind === 'collector') {
+        await this.opts.collectorRuntimeState?.markSuccess({
+          credentialId: tokenResult.credential.credentialId,
+          source: 'WS',
+        });
+      }
       this.opts.usage?.markWsConnected(
         this.opts.profile,
         tokenResult.credential,
@@ -1029,6 +1035,39 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     );
   }
 
+  private async recordWsLoginFailure(
+    err: unknown,
+    credential = this.activeWsCredential,
+  ): Promise<void> {
+    if (isCredentialAuthFailure(err)) {
+      await this.recordWsAuthFailed(err, credential);
+      return;
+    }
+
+    await this.recordWsLimited(err, credential);
+  }
+
+  private async recordWsLimited(err: unknown, credential = this.activeWsCredential): Promise<void> {
+    if (this.opts.profile !== 'collector' || !credential) return;
+
+    await this.opts.collectorRuntimeState?.markWsLimited({
+      credentialId: credential.credentialId,
+      reason: `WS limited suspected: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  private async recordWsAuthFailed(
+    err: unknown,
+    credential = this.activeWsCredential,
+  ): Promise<void> {
+    if (this.opts.profile !== 'collector' || !credential) return;
+
+    await this.opts.collectorRuntimeState?.markAuthFailed({
+      credentialId: credential.credentialId,
+      reason: `WS auth failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
   private assertProfile(expected: BrokerageVendorProfile, method: string): void {
     if (this.opts.profile !== expected) {
       throw new NotImplementedError(
@@ -1070,6 +1109,25 @@ function isLoginFailure(err: unknown): boolean {
   const message = err.message ?? '';
 
   return message.startsWith('Kiwoom LOGIN failed') || message === 'Kiwoom LOGIN ack timeout';
+}
+
+function isCredentialAuthFailure(err: unknown): boolean {
+  if (!(err instanceof IntegrationError)) return false;
+
+  const details = err.details ?? {};
+  const returnMsg = typeof details.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const returnCode = String(details.returnCode ?? '').toLowerCase();
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    haystack.includes('auth') ||
+    haystack.includes('token') ||
+    haystack.includes('invalid') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('인증') ||
+    haystack.includes('토큰')
+  );
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1243,10 +1301,7 @@ function parseKiwoomCandleTs(
 }
 
 function mapOrderResponseToAck(
-  response:
-    | PlaceOrderResponseContract
-    | CancelOrderResponseContract
-    | ModifyOrderResponseContract,
+  response: PlaceOrderResponseContract | CancelOrderResponseContract | ModifyOrderResponseContract,
   status: OrderAckModel['status'],
 ): OrderAckModel {
   const side: OrderSide = response.ordSide === '2' ? 'buy' : 'sell';

@@ -13,6 +13,8 @@ import { CredentialCooldownService } from './credential/credential-cooldown.serv
 import type { BrokerageCredentialMaterial } from './credential/brokerage-credential-material';
 import { CredentialSourceService } from './credential/credential-source.service';
 import { CredentialUsageService } from './credential/credential-usage.service';
+import { COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY } from '@shared/persistence/collector-credential/collector-credential-limit.token';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 import { BrokerageVendorResolver } from './service/brokerage-vendor.resolver';
 import { RateLimiter } from './service/rate-limiter.service';
 import { KiwoomTokenService } from './platforms/kiwoom/auth/kiwoom-token.service';
@@ -37,6 +39,7 @@ function buildKiwoomGateway(
   tokenCache: AccessTokenCacheService,
   source: CredentialSourceService,
   usage: CredentialUsageService,
+  collectorRuntimeState: CollectorCredentialLimitRepository,
 ): KiwoomBrokerageVendor {
   let lastWsCredentialId: number | null = null;
   let stickyCollectorWsMaterial: BrokerageCredentialMaterial | null = null;
@@ -57,7 +60,10 @@ function buildKiwoomGateway(
 
   const collectorWsTokenSupplier = async (): Promise<KiwoomTokenResult> => {
     if (!stickyCollectorWsMaterial) {
-      stickyCollectorWsMaterial = await source.selectCollectorCredential(Brokerage.Kiwoom, collectorMarketEnv());
+      stickyCollectorWsMaterial = await source.selectCollectorCredential(
+        Brokerage.Kiwoom,
+        collectorMarketEnv(),
+      );
     }
 
     const material = stickyCollectorWsMaterial;
@@ -102,8 +108,10 @@ function buildKiwoomGateway(
     };
   };
 
-  const apiTokenSupplier = profile === 'collector' ? collectorRestTokenSupplier : executorTokenSupplier;
-  const wsTokenSupplier = profile === 'collector' ? collectorWsTokenSupplier : executorTokenSupplier;
+  const apiTokenSupplier =
+    profile === 'collector' ? collectorRestTokenSupplier : executorTokenSupplier;
+  const wsTokenSupplier =
+    profile === 'collector' ? collectorWsTokenSupplier : executorTokenSupplier;
 
   const rateLimiter = new RateLimiter({
     name: `kiwoom.${profile}`,
@@ -119,6 +127,7 @@ function buildKiwoomGateway(
     tokenSupplier: apiTokenSupplier,
     rateLimiter,
     usage,
+    collectorRuntimeState,
   });
 
   const wsClient = new KiwoomWsClient({
@@ -134,6 +143,7 @@ function buildKiwoomGateway(
     tokenSupplier: wsTokenSupplier,
     accountTokenSupplier: profile === 'executor' ? accountTokenSupplier : undefined,
     usage,
+    collectorRuntimeState,
     invalidateToken: () => {
       // After repeated LOGIN failures the gateway invalidates only the
       // credential last used by the WS supplier. REST/account suppliers
@@ -157,6 +167,7 @@ const collectorGatewayProvider: Provider = {
     AccessTokenCacheService,
     CredentialSourceService,
     CredentialUsageService,
+    COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY,
   ],
   useFactory: (
     config: KiwoomConfig,
@@ -164,7 +175,17 @@ const collectorGatewayProvider: Provider = {
     tokenCache: AccessTokenCacheService,
     source: CredentialSourceService,
     usage: CredentialUsageService,
-  ) => buildKiwoomGateway(config, 'collector', tokenService, tokenCache, source, usage),
+    collectorRuntimeState: CollectorCredentialLimitRepository,
+  ) =>
+    buildKiwoomGateway(
+      config,
+      'collector',
+      tokenService,
+      tokenCache,
+      source,
+      usage,
+      collectorRuntimeState,
+    ),
 };
 
 const executorGatewayProvider: Provider = {
@@ -175,6 +196,7 @@ const executorGatewayProvider: Provider = {
     AccessTokenCacheService,
     CredentialSourceService,
     CredentialUsageService,
+    COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY,
   ],
   useFactory: (
     config: KiwoomConfig,
@@ -182,7 +204,17 @@ const executorGatewayProvider: Provider = {
     tokenCache: AccessTokenCacheService,
     source: CredentialSourceService,
     usage: CredentialUsageService,
-  ) => buildKiwoomGateway(config, 'executor', tokenService, tokenCache, source, usage),
+    collectorRuntimeState: CollectorCredentialLimitRepository,
+  ) =>
+    buildKiwoomGateway(
+      config,
+      'executor',
+      tokenService,
+      tokenCache,
+      source,
+      usage,
+      collectorRuntimeState,
+    ),
 };
 
 @Global()

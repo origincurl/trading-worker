@@ -7,6 +7,7 @@ import type { MarketEnv } from '@shared/model/api-credential/market-env.enum';
 // api_credentials (depending on origin) — used as the cache key for
 // access-token-cache + credential-cooldown services.
 export interface BrokerageCredentialMaterial {
+  readonly kind: 'collector' | 'executor';
   readonly credentialId: number;
   readonly brokerage: Brokerage;
   readonly marketEnv: MarketEnv;

@@ -96,6 +96,7 @@ export class CredentialSourceService {
     }
 
     return {
+      kind: 'collector',
       credentialId: picked.id,
       brokerage: picked.brokerage,
       marketEnv: picked.marketEnv,
@@ -175,6 +176,7 @@ export class CredentialSourceService {
     }
 
     return {
+      kind: 'executor',
       credentialId: api.id,
       brokerage: picked.brokerage,
       marketEnv: picked.marketEnv,

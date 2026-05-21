@@ -50,7 +50,9 @@ async function main() {
   loadDotenv();
 
   if (process.env.NODE_ENV === 'production' && process.env.PROBE_FORCE !== 'true') {
-    throw new Error('Refusing to run Kiwoom WS probe in production. Set PROBE_FORCE=true to override explicitly.');
+    throw new Error(
+      'Refusing to run Kiwoom WS probe in production. Set PROBE_FORCE=true to override explicitly.',
+    );
   }
 
   const logger = new Logger('KiwoomWsConcurrencyProbe');
@@ -64,13 +66,15 @@ async function main() {
     const encryption = app.get(CredentialEncryptionService);
     const tokenService = app.get(KiwoomTokenService);
     const kiwoom = app.get<KiwoomConfig>(KIWOOM_CONFIG);
-    const marketEnv = kiwoom.marketEnv === KiwoomMarketEnv.Mock ? MarketEnv.Mock : MarketEnv.Production;
+    const marketEnv =
+      kiwoom.marketEnv === KiwoomMarketEnv.Mock ? MarketEnv.Mock : MarketEnv.Production;
     const credentials = (await repository.findActive(Brokerage.Kiwoom, marketEnv)).filter(
       (credential) => CREDENTIAL_IDS.size === 0 || CREDENTIAL_IDS.has(credential.id),
     );
 
     if (!kiwoom.wsUrl) throw new Error('KIWOOM_WS_URL is required');
-    if (credentials.length === 0) throw new Error(`no ACTIVE collector credentials for ${Brokerage.Kiwoom}/${marketEnv}`);
+    if (credentials.length === 0)
+      throw new Error(`no ACTIVE collector credentials for ${Brokerage.Kiwoom}/${marketEnv}`);
 
     logger.log(
       `probing ${credentials.length} collector WS connection(s) env=${marketEnv} holdMs=${HOLD_MS} regSymbols=${REG_SYMBOLS.join(',') || '-'}`,
@@ -93,6 +97,7 @@ async function main() {
         }
 
         const token = await tokenService.issueAccessToken({
+          kind: 'collector',
           credentialId: credential.id,
           brokerage: credential.brokerage,
           marketEnv: credential.marketEnv,
@@ -199,12 +204,21 @@ function waitForLoginAck(client: KiwoomWsClient): Promise<void> {
       clearTimeout(timer);
 
       const returnCode = parsed.return_code;
-      if (returnCode === undefined || returnCode === null || returnCode === 0 || returnCode === '0') {
+      if (
+        returnCode === undefined ||
+        returnCode === null ||
+        returnCode === 0 ||
+        returnCode === '0'
+      ) {
         resolve();
         return;
       }
 
-      reject(new Error(`LOGIN rejected return_code=${String(returnCode)} return_msg=${String(parsed.return_msg ?? '')}`));
+      reject(
+        new Error(
+          `LOGIN rejected return_code=${String(returnCode)} return_msg=${String(parsed.return_msg ?? '')}`,
+        ),
+      );
     });
   });
 }

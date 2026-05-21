@@ -73,6 +73,7 @@ export class CollectorCredentialRuntimeStateEntity {
   @Column({
     type: 'enum',
     enum: CollectorCredentialRuntimeStatus,
+    enumName: 'collector_credential_runtime_status',
     default: CollectorCredentialRuntimeStatus.Active,
   })
   status!: CollectorCredentialRuntimeStatus;

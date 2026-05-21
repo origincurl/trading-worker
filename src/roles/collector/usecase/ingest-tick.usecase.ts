@@ -9,6 +9,7 @@ import { DeadLetterService } from '@roles/collector/service/dead-letter.service'
 import { MarketIndexSnapshotService } from '@roles/collector/service/market-index-snapshot.service';
 import { MarketOrderbookService } from '@roles/collector/service/market-orderbook.service';
 import { MarketTickService } from '@roles/collector/service/market-tick.service';
+import { RefreshUniverseUsecase } from './refresh-universe.usecase';
 
 interface IngestStats {
   total: number;
@@ -38,6 +39,7 @@ export class IngestTickUsecase {
     private readonly orderbookService: MarketOrderbookService,
     private readonly marketIndexService: MarketIndexSnapshotService,
     private readonly deadLetter: DeadLetterService,
+    private readonly refreshUniverse: RefreshUniverseUsecase,
   ) {}
 
   snapshotStats(): Readonly<IngestStats> {
@@ -59,6 +61,7 @@ export class IngestTickUsecase {
     switch (result.kind) {
       case 'tick':
         this.stats.ticks += 1;
+        this.refreshUniverse.recordFrameReceived(result.tick.symbol, new Date(result.tick.receivedAt));
 
         if (result.tick.parseWarnings.length > 0) {
           this.stats.parseWarnings += 1;
@@ -77,6 +80,10 @@ export class IngestTickUsecase {
 
       case 'orderbook':
         this.stats.orderbooks += 1;
+        this.refreshUniverse.recordFrameReceived(
+          result.orderbook.symbol,
+          new Date(result.orderbook.receivedAt),
+        );
 
         await this.orderbookService.recordSnapshot(result.orderbook);
 

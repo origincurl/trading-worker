@@ -17,19 +17,36 @@ const FE_OBSERVATION_STOCKS_HASH = 'fe:observation:stocks:refcnt';
 const FE_OBSERVATION_ETFS_HASH = 'fe:observation:etfs:refcnt';
 
 export interface SubscriptionDriftSnapshot {
-  readonly desiredNotActual: readonly string[];
-  readonly actualNotDesired: readonly string[];
+  readonly desiredNotRequestedCount: number;
+  readonly requestedNotDesiredCount: number;
+  readonly requestedNotEffectiveCount: number;
+  readonly effectiveNotRequestedCount: number;
+  readonly desiredNotRequestedSample: readonly string[];
+  readonly requestedNotDesiredSample: readonly string[];
+  readonly requestedNotEffectiveSample: readonly string[];
+  readonly effectiveNotRequestedSample: readonly string[];
 }
 
 export interface SubscriptionStateSnapshot {
-  readonly desired: readonly string[];
-  // Worker-local requested set after REG/REMOVE send completion. This is not
-  // broker-confirmed; sharding should introduce an effective/frame-backed axis.
-  readonly actual: readonly string[];
+  readonly desiredCount: number;
+  readonly actualRequestedCount: number;
+  readonly actualEffectiveCount: number;
+  readonly desiredSample: readonly string[];
+  // Worker-local requested set after REG/REMOVE send completion. This is not broker-confirmed.
+  readonly actualRequestedSample: readonly string[];
+  // Frame-backed coverage: requested symbols that emitted a frame inside effectiveWindowMs.
+  readonly actualEffectiveSample: readonly string[];
   readonly drift: SubscriptionDriftSnapshot;
   readonly lastReconcileAt: string | null;
   readonly lastHintAt: string | null;
+  readonly effectiveWindowMs: number;
+  readonly effectiveState: 'warming_up' | 'ready';
+  readonly effectiveWarmupUntil: string;
 }
+
+const EFFECTIVE_WINDOW_MS = 30_000;
+const FRAME_RETENTION_MS = EFFECTIVE_WINDOW_MS * 10;
+const SAMPLE_SIZE = 10;
 
 // Pulls the live observation universe from Redis (FE-observed now; strategy
 // demand joins this path in Phase 4) and re-applies it to the in-memory
@@ -39,6 +56,8 @@ export interface SubscriptionStateSnapshot {
 @Injectable()
 export class RefreshUniverseUsecase {
   private readonly logger = new Logger(RefreshUniverseUsecase.name);
+
+  private readonly bootedAtMs = Date.now();
 
   private _lastRefreshAt: Date | null = null;
 
@@ -51,6 +70,8 @@ export class RefreshUniverseUsecase {
   private desiredSymbols: readonly string[] = [];
 
   private actualSymbols: readonly string[] = [];
+
+  private readonly lastFrameAtBySymbol = new Map<string, number>();
 
   constructor(
     @Inject(COLLECTOR_CONFIG) private readonly collectorConfig: CollectorConfig,
@@ -76,19 +97,47 @@ export class RefreshUniverseUsecase {
     this._lastHintAt = at;
   }
 
+  recordFrameReceived(symbol: string, at = new Date()): void {
+    const normalized = symbol.trim();
+
+    if (!normalized) return;
+
+    this.lastFrameAtBySymbol.set(normalized, at.getTime());
+  }
+
   subscriptionState(): SubscriptionStateSnapshot {
+    this.pruneLastFrameEntries();
+
     const desired = normalizeSymbols(this.desiredSymbols);
-    const actual = normalizeSymbols(this.actualSymbols);
+    const actualRequested = normalizeSymbols(this.actualSymbols);
+    const actualEffective = this.effectiveSymbols();
+    const desiredNotRequested = difference(desired, actualRequested);
+    const requestedNotDesired = difference(actualRequested, desired);
+    const requestedNotEffective = difference(actualRequested, actualEffective);
+    const effectiveNotRequested = difference(actualEffective, actualRequested);
 
     return {
-      desired,
-      actual,
+      desiredCount: desired.length,
+      actualRequestedCount: actualRequested.length,
+      actualEffectiveCount: actualEffective.length,
+      desiredSample: sample(desired),
+      actualRequestedSample: sample(actualRequested),
+      actualEffectiveSample: sample(actualEffective),
       drift: {
-        desiredNotActual: difference(desired, actual),
-        actualNotDesired: difference(actual, desired),
+        desiredNotRequestedCount: desiredNotRequested.length,
+        requestedNotDesiredCount: requestedNotDesired.length,
+        requestedNotEffectiveCount: requestedNotEffective.length,
+        effectiveNotRequestedCount: effectiveNotRequested.length,
+        desiredNotRequestedSample: sample(desiredNotRequested),
+        requestedNotDesiredSample: sample(requestedNotDesired),
+        requestedNotEffectiveSample: sample(requestedNotEffective),
+        effectiveNotRequestedSample: sample(effectiveNotRequested),
       },
       lastReconcileAt: this._lastReconcileAt?.toISOString() ?? null,
       lastHintAt: this._lastHintAt?.toISOString() ?? null,
+      effectiveWindowMs: EFFECTIVE_WINDOW_MS,
+      effectiveState: this.effectiveState(),
+      effectiveWarmupUntil: new Date(this.bootedAtMs + EFFECTIVE_WINDOW_MS).toISOString(),
     };
   }
 
@@ -175,6 +224,27 @@ export class RefreshUniverseUsecase {
       return [];
     }
   }
+
+  private effectiveSymbols(): string[] {
+    const cutoff = Date.now() - EFFECTIVE_WINDOW_MS;
+
+    return Array.from(this.lastFrameAtBySymbol.entries())
+      .filter(([, timestamp]) => timestamp >= cutoff)
+      .map(([symbol]) => symbol)
+      .sort();
+  }
+
+  private pruneLastFrameEntries(now = Date.now()): void {
+    const cutoff = now - FRAME_RETENTION_MS;
+
+    for (const [symbol, timestamp] of this.lastFrameAtBySymbol) {
+      if (timestamp < cutoff) this.lastFrameAtBySymbol.delete(symbol);
+    }
+  }
+
+  private effectiveState(): SubscriptionStateSnapshot['effectiveState'] {
+    return Date.now() < this.bootedAtMs + EFFECTIVE_WINDOW_MS ? 'warming_up' : 'ready';
+  }
 }
 
 function normalizeSymbols(symbols: readonly string[]): string[] {
@@ -185,4 +255,8 @@ function difference(left: readonly string[], right: readonly string[]): string[]
   const rightSet = new Set(right);
 
   return left.filter((symbol) => !rightSet.has(symbol));
+}
+
+function sample(symbols: readonly string[]): string[] {
+  return symbols.slice(0, SAMPLE_SIZE);
 }

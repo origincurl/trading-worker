@@ -466,6 +466,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
               currency: row.currency ?? 'KRW',
               isinSymbol: row.isin ?? row.isinCd ?? row.isin_cd,
             });
+
             segmentRows += 1;
           }
 
@@ -545,6 +546,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       this.loggedIn = false;
       if (this.activeWsCredential) {
         this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+
         this.activeWsCredential = null;
       }
 
@@ -876,17 +878,28 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   }
 
   private async performLogin(): Promise<void> {
-    const tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
-    const ack = this.installLoginAckGate();
+    let tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
 
     try {
-      await this.opts.wsClient.send({ trnm: 'LOGIN', token: tokenResult.token });
-
-      await ack;
+      await this.sendLoginAndWait(tokenResult.token);
     } catch (err) {
-      await this.recordWsLoginFailure(err, tokenResult.credential);
+      const retryTokenResult = await this.refreshWsLoginToken(tokenResult, err);
 
-      throw err;
+      if (!retryTokenResult) {
+        await this.recordWsLoginFailure(err, tokenResult.credential);
+
+        throw err;
+      }
+
+      tokenResult = retryTokenResult;
+
+      try {
+        await this.sendLoginAndWait(tokenResult.token);
+      } catch (retryErr) {
+        await this.recordWsLoginFailure(retryErr, tokenResult.credential);
+
+        throw retryErr;
+      }
     }
 
     if (
@@ -916,6 +929,28 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     const delay = this.opts.postLoginDelayMs ?? DEFAULT_POST_LOGIN_DELAY_MS;
 
     if (delay > 0) await sleep(delay);
+  }
+
+  private async sendLoginAndWait(token: string): Promise<void> {
+    const ack = this.installLoginAckGate();
+
+    await this.opts.wsClient.send({ trnm: 'LOGIN', token });
+
+    await ack;
+  }
+
+  private async refreshWsLoginToken(
+    tokenResult: ReturnType<typeof normalizeTokenResult>,
+    err: unknown,
+  ): Promise<ReturnType<typeof normalizeTokenResult> | null> {
+    if (!tokenResult.invalidate || !isTokenRejected(err)) return null;
+
+    tokenResult.invalidate();
+
+    const next = normalizeTokenResult(await this.opts.tokenSupplier());
+    if (!next.token || next.token === tokenResult.token) return null;
+
+    return next;
   }
 
   private async scheduleReconnect(): Promise<void> {
@@ -1040,6 +1075,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   ): Promise<void> {
     if (isCredentialAuthFailure(err)) {
       await this.recordWsAuthFailed(err, credential);
+
       return;
     }
 
@@ -1127,6 +1163,23 @@ function isCredentialAuthFailure(err: unknown): boolean {
     haystack.includes('unauthorized') ||
     haystack.includes('인증') ||
     haystack.includes('토큰')
+  );
+}
+
+function isTokenRejected(err: unknown): boolean {
+  if (!(err instanceof IntegrationError)) return false;
+
+  const details = err.details ?? {};
+  const returnMsg = typeof details.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const returnCode = String(details.returnCode ?? '').toLowerCase();
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    haystack.includes('token') ||
+    haystack.includes('토큰') ||
+    haystack.includes('expired') ||
+    haystack.includes('만료')
   );
 }
 

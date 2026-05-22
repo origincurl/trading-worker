@@ -22,6 +22,7 @@ export type KiwoomTokenResult =
   | {
       readonly token: string;
       readonly credential: CredentialUsageContext;
+      readonly invalidate?: () => void;
     };
 
 export type KiwoomTokenSupplier = () => Promise<KiwoomTokenResult>;
@@ -80,12 +81,16 @@ export class KiwoomApiClient {
     const path = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
     const url = `${restUrl}${path}`;
 
-    const tokenResult = normalizeTokenResult(await (tokenSupplier ?? this.opts.tokenSupplier)());
+    const resolveToken = tokenSupplier ?? this.opts.tokenSupplier;
+    const initialTokenResult = normalizeTokenResult(await resolveToken());
 
     return this.opts.rateLimiter.run(async () => {
       let response: Response;
 
-      const request = async (): Promise<TResponse> => {
+      const request = async (
+        tokenResult: NormalizedKiwoomTokenResult,
+        allowTokenRetry: boolean,
+      ): Promise<TResponse> => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), DEFAULT_REST_TIMEOUT_MS);
 
@@ -141,6 +146,12 @@ export class KiwoomApiClient {
 
         if (!response.ok) {
           const { returnCode, returnMsg } = extractReturnFields(parsed);
+          if (allowTokenRetry && shouldRetryWithFreshToken(tokenResult, returnCode, returnMsg)) {
+            const nextTokenResult = await refreshTokenResult(resolveToken, tokenResult);
+
+            if (nextTokenResult) return await request(nextTokenResult, false);
+          }
+
           await this.recordFailedResponse(tokenResult.credential, {
             httpStatus: response.status,
             returnCode,
@@ -174,6 +185,12 @@ export class KiwoomApiClient {
           returnCode !== 0 &&
           returnCode !== '0'
         ) {
+          if (allowTokenRetry && shouldRetryWithFreshToken(tokenResult, returnCode, returnMsg)) {
+            const nextTokenResult = await refreshTokenResult(resolveToken, tokenResult);
+
+            if (nextTokenResult) return await request(nextTokenResult, false);
+          }
+
           await this.recordRejectedResponse(tokenResult.credential, {
             returnCode,
             returnMsg,
@@ -201,23 +218,28 @@ export class KiwoomApiClient {
       };
 
       try {
-        if (tokenResult.credential && this.opts.usage) {
+        if (initialTokenResult.credential && this.opts.usage) {
           return await this.opts.usage.runRest(
             this.opts.profile,
-            tokenResult.credential,
+            initialTokenResult.credential,
             endpointLabel(endpointPath),
-            request,
+            () => request(initialTokenResult, true),
           );
         }
 
-        if (!tokenResult.credential && this.opts.usage && !this.warnedMissingCredentialContext) {
+        if (
+          !initialTokenResult.credential &&
+          this.opts.usage &&
+          !this.warnedMissingCredentialContext
+        ) {
           this.warnedMissingCredentialContext = true;
+
           this.logger.warn(
             `Kiwoom REST usage tracking skipped because token supplier returned no credential context apiId=${apiId} path=${path}`,
           );
         }
 
-        return await request();
+        return await request(initialTokenResult, true);
       } catch (err) {
         if (err instanceof DomainError) throw err;
 
@@ -250,6 +272,7 @@ export class KiwoomApiClient {
         retryAfterMs: input.retryAfterMs,
         reason,
       });
+
       return;
     }
 
@@ -280,6 +303,7 @@ export class KiwoomApiClient {
         credentialId: credential.credentialId,
         reason,
       });
+
       return;
     }
 
@@ -308,15 +332,18 @@ export class KiwoomApiClient {
   }
 }
 
-export function normalizeTokenResult(value: KiwoomTokenResult): {
+type NormalizedKiwoomTokenResult = {
   readonly token: string;
   readonly credential: CredentialUsageContext | null;
-} {
+  readonly invalidate?: () => void;
+};
+
+export function normalizeTokenResult(value: KiwoomTokenResult): NormalizedKiwoomTokenResult {
   if (typeof value === 'string') {
     return { token: value, credential: null };
   }
 
-  return { token: value.token, credential: value.credential };
+  return { token: value.token, credential: value.credential, invalidate: value.invalidate };
 }
 
 function endpointLabel(endpointPath: string): string {
@@ -388,4 +415,38 @@ function looksAuthFailed(
     haystack.includes('인증') ||
     haystack.includes('토큰')
   );
+}
+
+function looksTokenRejected(
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  const haystack = `${String(returnCode ?? '')} ${returnMsg ?? ''}`.toLowerCase();
+
+  return (
+    haystack.includes('token') ||
+    haystack.includes('토큰') ||
+    haystack.includes('expired') ||
+    haystack.includes('만료')
+  );
+}
+
+function shouldRetryWithFreshToken(
+  tokenResult: NormalizedKiwoomTokenResult,
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  return Boolean(tokenResult.invalidate && looksTokenRejected(returnCode, returnMsg));
+}
+
+async function refreshTokenResult(
+  resolveToken: KiwoomTokenSupplier,
+  current: NormalizedKiwoomTokenResult,
+): Promise<NormalizedKiwoomTokenResult | null> {
+  current.invalidate?.();
+
+  const next = normalizeTokenResult(await resolveToken());
+  if (!next.token || next.token === current.token) return null;
+
+  return next;
 }

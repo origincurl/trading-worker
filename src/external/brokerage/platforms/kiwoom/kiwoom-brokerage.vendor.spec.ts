@@ -1,5 +1,6 @@
 import { KiwoomBrokerageVendor } from './kiwoom-brokerage.vendor';
 import type { KiwoomRequestOptions } from './kiwoom.api-client';
+import type { KiwoomWsMessageHandler } from './kiwoom-ws.client';
 
 describe('KiwoomBrokerageVendor.fetchChartCandles', () => {
   function makeVendor(response: unknown, requests: Array<KiwoomRequestOptions<unknown>>) {
@@ -143,5 +144,93 @@ describe('KiwoomBrokerageVendor.fetchChartCandles', () => {
       low: 273000,
       close: 274500,
     });
+  });
+});
+
+describe('KiwoomBrokerageVendor.connectMarketDataStream', () => {
+  it('invalidates and retries WS LOGIN once when the first token is stale', async () => {
+    const sentMessages: object[] = [];
+    const wsMessages: KiwoomWsMessageHandler[] = [];
+    const invalidate = jest.fn();
+    const tokenSupplier = jest
+      .fn()
+      .mockResolvedValueOnce({
+        token: 'stale-token',
+        credential: { kind: 'collector', credentialId: 7 },
+        invalidate,
+      })
+      .mockResolvedValueOnce({
+        token: 'fresh-token',
+        credential: { kind: 'collector', credentialId: 7 },
+        invalidate,
+      });
+    const collectorRuntimeState = {
+      markSuccess: jest.fn(async () => undefined),
+      markAuthFailed: jest.fn(async () => undefined),
+      markWsLimited: jest.fn(async () => undefined),
+    };
+    const loginResponses = [
+      {
+        trnm: 'LOGIN',
+        return_code: 8005,
+        return_msg: 'Token이 유효하지 않습니다',
+      },
+      {
+        trnm: 'LOGIN',
+        return_code: 0,
+        return_msg: 'OK',
+      },
+    ];
+    const wsClient = {
+      connect: jest.fn(async () => undefined),
+      disconnect: jest.fn(async () => undefined),
+      isConnected: jest.fn(() => true),
+      onClose: jest.fn(),
+      onMessage: jest.fn((handler: KiwoomWsMessageHandler) => {
+        wsMessages.push(handler);
+
+        return () => {
+          const index = wsMessages.indexOf(handler);
+          if (index >= 0) wsMessages.splice(index, 1);
+        };
+      }),
+      send: jest.fn(async (message: object) => {
+        sentMessages.push(message);
+
+        if ((message as { trnm?: unknown }).trnm === 'LOGIN') {
+          const response = loginResponses.shift();
+          if (response) {
+            for (const handler of [...wsMessages]) {
+              handler(response, JSON.stringify(response));
+            }
+          }
+        }
+      }),
+    };
+    const vendor = new KiwoomBrokerageVendor({
+      profile: 'collector',
+      apiClient: {} as never,
+      wsClient: wsClient as never,
+      tokenSupplier,
+      collectorRuntimeState: collectorRuntimeState as never,
+      postLoginDelayMs: 0,
+    });
+
+    await vendor.connectMarketDataStream(jest.fn());
+
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(tokenSupplier).toHaveBeenCalledTimes(2);
+    expect(wsClient.send).toHaveBeenCalledTimes(2);
+    expect(sentMessages).toEqual([
+      { trnm: 'LOGIN', token: 'stale-token' },
+      { trnm: 'LOGIN', token: 'fresh-token' },
+    ]);
+    expect(collectorRuntimeState.markAuthFailed).not.toHaveBeenCalled();
+    expect(collectorRuntimeState.markWsLimited).not.toHaveBeenCalled();
+    expect(collectorRuntimeState.markSuccess).toHaveBeenCalledWith({
+      credentialId: 7,
+      source: 'WS',
+    });
+    expect(vendor.isMarketDataStreamConnected()).toBe(true);
   });
 });

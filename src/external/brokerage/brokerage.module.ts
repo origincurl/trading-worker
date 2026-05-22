@@ -59,6 +59,7 @@ function buildKiwoomGateway(
     return {
       token,
       credential: { kind: 'collector', credentialId: material.credentialId },
+      invalidate: () => tokenCache.invalidate(material.credentialId),
     };
   };
 
@@ -72,6 +73,7 @@ function buildKiwoomGateway(
     }
 
     const material = stickyCollectorWsMaterial;
+
     lastWsCredentialId = material.credentialId;
 
     try {
@@ -80,6 +82,7 @@ function buildKiwoomGateway(
       return {
         token,
         credential: { kind: 'collector', credentialId: material.credentialId },
+        invalidate: () => tokenCache.invalidate(material.credentialId),
       };
     } catch (err) {
       if (stickyCollectorWsMaterial?.credentialId === material.credentialId) {

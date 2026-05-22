@@ -31,6 +31,7 @@ export class BullMqBusQueue implements BusQueue, OnModuleDestroy {
       jobId: opts?.jobId,
       delay: opts?.delayMs,
       attempts: opts?.attempts,
+      backoff: opts?.backoff ? { type: opts.backoff.type, delay: opts.backoff.delayMs } : undefined,
       removeOnComplete: 1000,
       removeOnFail: 5000,
     });

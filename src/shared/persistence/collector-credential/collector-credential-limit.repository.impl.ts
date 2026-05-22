@@ -178,6 +178,28 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
             credentialId: input.credentialId,
           });
 
+        if (input.source === 'TOKEN') {
+          await query
+            .set({
+              status: CollectorCredentialRuntimeStatus.Active,
+              cooldownUntil: null,
+              lastErrorMessage: null,
+              restStatus: CollectorCredentialRuntimeStatus.Active,
+              restCooldownUntil: null,
+              restLastErrorMessage: null,
+              wsStatus: CollectorCredentialRuntimeStatus.Active,
+              wsCooldownUntil: null,
+              wsLastErrorMessage: null,
+            })
+            .andWhere(
+              '(status IN (:...statuses) OR rest_status IN (:...statuses) OR ws_status IN (:...statuses))',
+              { statuses: clearableStatuses },
+            )
+            .execute();
+
+          return;
+        }
+
         if (input.source === 'WS') {
           await query
             .set({
@@ -317,20 +339,25 @@ export class CollectorCredentialLimitRepositoryImpl implements CollectorCredenti
     };
     if (input.endpoint === 'REST') {
       set.restStatus = input.status;
+
       set.restLastErrorMessage = sanitizedError;
       if (input.lastRateLimitedAt) {
         set.lastRateLimitedAt = input.lastRateLimitedAt;
+
         set.restLastRateLimitedAt = input.lastRateLimitedAt;
       }
       if (input.lastRetryAfterMs !== undefined) {
         set.lastRetryAfterMs = input.lastRetryAfterMs;
+
         set.restLastRetryAfterMs = input.lastRetryAfterMs;
       }
     } else {
       set.wsStatus = input.status;
+
       set.wsLastErrorMessage = sanitizedError;
       if (input.lastWsLimitedAt) {
         set.lastWsLimitedAt = input.lastWsLimitedAt;
+
         set.wsLastLimitedAt = input.lastWsLimitedAt;
       }
     }
@@ -426,5 +453,5 @@ function clearableStatusesForSuccess(
   }
   if (source === 'WS') return [CollectorCredentialRuntimeStatus.WsLimited];
 
-  return [CollectorCredentialRuntimeStatus.Cooldown];
+  return [CollectorCredentialRuntimeStatus.AuthFailed, CollectorCredentialRuntimeStatus.Cooldown];
 }

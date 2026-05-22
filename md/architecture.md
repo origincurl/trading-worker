@@ -234,6 +234,62 @@ BE 와 동일.
 - vendor interface 는 model 기준
 - contract 는 platform 폴더 밖으로 노출 금지
 
+#### Kiwoom token recovery invariant
+
+Kiwoom collector REST/WS 경로는 stale access token을 영구 credential failure로
+바로 확정하지 않는다. Token rejection으로 판단되는 응답을 받으면 다음 순서로
+1회 self-heal을 시도한다.
+
+1. 현재 credential의 access-token cache를 invalidate한다.
+2. 동일 token supplier를 다시 호출해 fresh token을 받는다.
+3. 새 token이 비어 있거나 이전 token과 같으면 retry하지 않는다.
+4. 새 token이 다르면 동일 요청을 한 번만 retry한다.
+5. retry도 실패하거나 token rejection이 아니면 기존 failure path로 넘어간다.
+
+REST는 HTTP non-2xx와 HTTP 200 + non-zero `return_code` 양쪽에서 이 정책을
+적용한다. WS는 LOGIN ack failure가 token rejection으로 보일 때 같은 socket에서
+LOGIN을 한 번 더 보낸다. 같은 socket retry가 broker에서 거부되더라도 timeout /
+failure path가 기존 reconnect loop로 회수하므로 안전한 실패가 된다.
+
+`TOKEN` source의 credential success는 appKey/appSecret 유효성에 대한 강한
+신호로 취급한다. 따라서 stale token 때문에 찍힌 REST/WS `AUTH_FAILED` 또는
+`COOLDOWN`은 token 발급 성공 시 `ACTIVE`로 회복한다. 단 endpoint-specific
+permission revoke가 존재하는 broker 정책에서는 `AUTH_FAILED -> ACTIVE` 진동이
+가능하므로 운영 metric/alert로 감시해야 한다.
+
+#### Chart catchup retry invariant
+
+Chart catchup은 logical error를 successful BullMQ job으로 숨기지 않는다.
+`ProcessChartCatchupUsecase`는 worker completion event를 먼저 publish한 뒤,
+`result.errors.length > 0`이면 `IntegrationError`를 throw하여 BullMQ failed /
+retry 상태로 올린다.
+
+Catchup request dedupe의 1차 책임은 BE의 deterministic requestId Redis lock이다.
+Worker subscriber는 BullMQ `jobId=requestId`를 사용하지 않는다. 그래야 한 번
+completed/failed 된 gap도 lock expiry 이후 다시 enqueue될 수 있다.
+
+현재 chart catchup queue 정책:
+
+- `attempts: 3`
+- exponential backoff 1s
+- BE catchup request lock TTL: 60s
+
+이 조합은 일반 stale-token / transient REST failure를 lock TTL 안에서 재시도하기
+위한 값이다. Worker REST latency P99가 커지면 BE lock TTL을 120s 이상으로
+조정해야 한다. Candle write는 `(symbol, market, source, bucket_start)` 계열의
+idempotent key 충돌 처리를 전제로 한다.
+
+남은 운영 follow-up:
+
+- WS LOGIN retry spec은 유지한다. REST retry와 동일하게 invalidate, token supplier
+  2회, stale/fresh LOGIN 2회, auth failure 미기록, WS success 기록을 검증한다.
+- Completion consumer/dashboard를 추가할 때는 `requestId` 기준 last-write-wins
+  또는 attempt-aware dedupe를 적용한다. attempts=3이면 같은 requestId completion
+  event가 최대 3회 publish될 수 있다.
+- `AUTH_FAILED -> ACTIVE` transition rate metric/alert를 추가해 false recovery loop를
+  감지한다.
+- Catchup failedReason을 운영 dashboard에 노출한다.
+
 ### bus (워커 고유)
 역할 간 메시지 송수신 전용 계층. service에서 사용한다.
 

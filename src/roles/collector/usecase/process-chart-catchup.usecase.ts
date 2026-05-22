@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { IntegrationError } from '@common/error/domain.error';
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import {
   ChartCatchupService,
@@ -36,6 +37,14 @@ export class ProcessChartCatchupUsecase {
         `catchup completion publish failed: ${err instanceof Error ? err.message : err}`,
       ),
     );
+
+    if (result.errors.length > 0) {
+      throw new IntegrationError(`chart catchup failed request=${request.requestId}`, {
+        requestId: request.requestId,
+        symbol: request.symbol,
+        errors: result.errors,
+      });
+    }
 
     return result;
   }

@@ -1,0 +1,30 @@
+name: worker-redeploy
+# 빌드 없이 지정 이미지 태그로 VM-B 에 worker 배포만 수행.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "재배포할 worker 이미지 태그 (예: worker-20260522-143012-a1b2c3d). 생략 시 worker-latest"
+        required: false
+        default: "worker-latest"
+
+concurrency:
+  group: worker-deploy
+  cancel-in-progress: false
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger worker-deploy.sh on VM-B
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_B_HOST }}
+          username: ${{ secrets.VM_B_USER || 'ubuntu' }}
+          key: ${{ secrets.VM_B_SSH_KEY }}
+          port: ${{ secrets.VM_B_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            /opt/trading/scripts/worker-deploy.sh --tag ${{ inputs.image_tag }}

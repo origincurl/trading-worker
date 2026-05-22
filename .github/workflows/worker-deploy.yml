@@ -1,0 +1,74 @@
+name: worker-deploy
+# trading-worker 도커 이미지 빌드 / push 후 VM-B 에 배포 트리거.
+# 사전 Secrets: DOCKERHUB_USERNAME, DOCKERHUB_PAT_PUSH (Read/Write/Delete), VM_B_HOST, VM_B_USER, VM_B_SSH_KEY
+# VM-B 는 VM-A 와 동일하게 퍼블릭 서브넷 + EIP 보유 — runner 가 직접 SSH.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "빌드할 git ref (default: main)"
+        required: false
+        default: "main"
+
+concurrency:
+  group: worker-deploy
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PAT_PUSH }}
+
+      - name: Resolve image tag
+        id: tag
+        run: |
+          SHA_SHORT=$(git rev-parse --short=7 HEAD)
+          # 네이밍 규칙: <role>-<YYYYMMDD-HHmmss>-<git-sha7>. 시간은 KST 기준.
+          TS=$(TZ=Asia/Seoul date +'%Y%m%d-%H%M%S')
+          echo "image_tag=worker-${TS}-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & Push
+        uses: docker/build-push-action@v6
+        with:
+          # 이 workflow 는 trading-worker repo 의 .github/workflows/ 에 위치 — checkout 의 root 가 trading-worker repo.
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            docker.io/${{ vars.IMAGE_REPO || 'origincurl/trading-dev' }}:${{ steps.tag.outputs.image_tag }}
+            docker.io/${{ vars.IMAGE_REPO || 'origincurl/trading-dev' }}:worker-latest
+          cache-from: type=registry,ref=docker.io/${{ vars.IMAGE_REPO || 'origincurl/trading-dev' }}:worker-buildcache
+          cache-to: type=registry,ref=docker.io/${{ vars.IMAGE_REPO || 'origincurl/trading-dev' }}:worker-buildcache,mode=max
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Trigger worker-deploy.sh on VM-B
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VM_B_HOST }}
+          username: ${{ secrets.VM_B_USER || 'ubuntu' }}
+          key: ${{ secrets.VM_B_SSH_KEY }}
+          port: ${{ secrets.VM_B_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -euo pipefail
+            /opt/trading/scripts/worker-deploy.sh --tag ${{ needs.build-and-push.outputs.image_tag }}

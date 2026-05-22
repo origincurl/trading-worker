@@ -28,8 +28,10 @@ COPY --from=builder --chown=worker:worker /app/package.json ./
 
 USER worker
 
-# Worker default port. ROLES MUST be supplied at runtime — no default.
+# Worker default listen port — 실제 listen 포트는 runtime PORT env 가 결정 (compose 가 WORKER_PORT 값을 주입).
+# EXPOSE 는 metadata 라 동작에 영향 없지만, 운영 WORKER_PORT 와 일치시켜 혼동 방지.
+# ROLES MUST be supplied at runtime — no default.
 ENV NODE_ENV=production
-EXPOSE 4002
+EXPOSE 5000
 
 CMD ["node", "dist/main"]

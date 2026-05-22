@@ -8,6 +8,7 @@ import type {
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
 import { CollectorShardAssignmentService } from '@roles/collector/service/collector-shard-assignment.service';
+import { StrategyDemandService } from '@roles/collector/service/strategy-demand.service';
 import { UniverseService } from '@roles/collector/service/universe.service';
 import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
 
@@ -32,6 +33,10 @@ export interface SubscriptionStateSnapshot {
   // Current worker-owned assignment set. Before multi-collector sharding this equals desiredSymbols.
   readonly assignedCount: number;
   readonly assignedSample: readonly string[];
+  readonly globalDesiredCount: number;
+  readonly globalDesiredSample: readonly string[];
+  readonly chartDesiredCount: number;
+  readonly strategyDesiredCount: number;
   readonly desiredCount: number;
   readonly actualRequestedCount: number;
   readonly actualEffectiveCount: number;
@@ -48,8 +53,15 @@ export interface SubscriptionStateSnapshot {
   readonly effectiveWarmupUntil: string;
   readonly activeCollectorCount: number;
   readonly activeCollectors: readonly string[];
+  readonly collectorHeartbeats: readonly {
+    readonly instanceId: string;
+    readonly lastBeatAt: string | null;
+    readonly ageMs: number | null;
+  }[];
   readonly shardLeaseStatus: 'not_configured' | 'configured';
   readonly takeoverEvents: readonly string[];
+  readonly heartbeatParseFailures: number;
+  readonly heartbeatRoleMisses: number;
 }
 
 const EFFECTIVE_WINDOW_MS = 30_000;
@@ -77,15 +89,27 @@ export class RefreshUniverseUsecase {
 
   private desiredSymbols: readonly string[] = [];
 
+  private globalDesiredSymbols: readonly string[] = [];
+
+  private chartDesiredCount = 0;
+
+  private strategyDesiredCount = 0;
+
   private actualSymbols: readonly string[] = [];
 
   private assignedSymbols: readonly string[] = [];
 
   private activeCollectors: readonly string[] = [];
 
+  private collectorHeartbeats: SubscriptionStateSnapshot['collectorHeartbeats'] = [];
+
   private shardLeaseStatus: 'not_configured' | 'configured' = 'not_configured';
 
   private takeoverEvents: readonly string[] = [];
+
+  private heartbeatParseFailures = 0;
+
+  private heartbeatRoleMisses = 0;
 
   private readonly lastFrameAtBySymbol = new Map<string, number>();
 
@@ -95,6 +119,7 @@ export class RefreshUniverseUsecase {
     @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
     private readonly universe: UniverseService,
     private readonly assignment: CollectorShardAssignmentService,
+    private readonly strategyDemand: StrategyDemandService,
     private readonly planner: SubscriptionPlannerService,
   ) {}
 
@@ -126,6 +151,7 @@ export class RefreshUniverseUsecase {
     this.pruneLastFrameEntries();
 
     const desired = normalizeSymbols(this.desiredSymbols);
+    const globalDesired = normalizeSymbols(this.globalDesiredSymbols);
     const assigned = normalizeSymbols(this.assignedSymbols);
     const actualRequested = normalizeSymbols(this.actualSymbols);
     const actualEffective = this.effectiveSymbols();
@@ -137,6 +163,10 @@ export class RefreshUniverseUsecase {
     return {
       assignedCount: assigned.length,
       assignedSample: sample(assigned),
+      globalDesiredCount: globalDesired.length,
+      globalDesiredSample: sample(globalDesired),
+      chartDesiredCount: this.chartDesiredCount,
+      strategyDesiredCount: this.strategyDesiredCount,
       desiredCount: desired.length,
       actualRequestedCount: actualRequested.length,
       actualEffectiveCount: actualEffective.length,
@@ -160,18 +190,25 @@ export class RefreshUniverseUsecase {
       effectiveWarmupUntil: new Date(this.bootedAtMs + EFFECTIVE_WINDOW_MS).toISOString(),
       activeCollectorCount: this.activeCollectors.length,
       activeCollectors: [...this.activeCollectors],
+      collectorHeartbeats: [...this.collectorHeartbeats],
       shardLeaseStatus: this.shardLeaseStatus,
       takeoverEvents: [...this.takeoverEvents],
+      heartbeatParseFailures: this.heartbeatParseFailures,
+      heartbeatRoleMisses: this.heartbeatRoleMisses,
     };
   }
 
   async execute(): Promise<void> {
     this._lastRefreshAt = new Date();
 
-    let feSymbols: ObservedSymbolModel[];
+    let chartSymbols: ObservedSymbolModel[];
+    let strategySymbols: ObservedSymbolModel[];
 
     try {
-      feSymbols = await this.readFeObservedSymbols();
+      [chartSymbols, strategySymbols] = await Promise.all([
+        this.readChartObservedSymbols(),
+        this.strategyDemand.activeSymbols(),
+      ]);
     } catch (err) {
       this._lastRefreshOk = false;
 
@@ -182,7 +219,7 @@ export class RefreshUniverseUsecase {
       return;
     }
 
-    const desiredUniverse = this.universe.apply([], [], feSymbols);
+    const desiredUniverse = this.universe.normalizeDemand(chartSymbols, strategySymbols);
 
     this._lastRefreshOk = true;
 
@@ -190,17 +227,29 @@ export class RefreshUniverseUsecase {
     const assignment = await this.assignment.assign(globalTarget);
     const target = [...assignment.assignedSymbols];
 
-    this.universe.applyAssigned(target);
+    this.universe.applyAssignedSnapshot(chartSymbols, strategySymbols, target);
 
     this.desiredSymbols = [...target];
+
+    this.globalDesiredSymbols = [...globalTarget];
+
+    this.chartDesiredCount = this.universe.observedFeCount();
+
+    this.strategyDesiredCount = this.universe.strategyDemandCount();
 
     this.assignedSymbols = [...target];
 
     this.activeCollectors = [...assignment.activeCollectors];
 
+    this.collectorHeartbeats = [...assignment.collectorHeartbeats];
+
     this.shardLeaseStatus = assignment.leaseStatus;
 
     this.takeoverEvents = [...assignment.takeoverEvents];
+
+    this.heartbeatParseFailures = assignment.heartbeatParseFailures;
+
+    this.heartbeatRoleMisses = assignment.heartbeatRoleMisses;
 
     if (!this.gateway.isMarketDataStreamConnected()) {
       this.logger.warn('gateway not connected — universe REG deferred');
@@ -233,7 +282,7 @@ export class RefreshUniverseUsecase {
     }
   }
 
-  private async readFeObservedSymbols(): Promise<ObservedSymbolModel[]> {
+  private async readChartObservedSymbols(): Promise<ObservedSymbolModel[]> {
     if (!this.redis) return [];
 
     try {
@@ -245,12 +294,12 @@ export class RefreshUniverseUsecase {
       return [
         ...(Array.isArray(stockKeys) ? stockKeys : []).map((symbol) => ({
           symbol,
-          source: 'FE' as const,
+          source: 'CHART' as const,
           instrumentType: 'STOCK' as const,
         })),
         ...(Array.isArray(etfKeys) ? etfKeys : []).map((symbol) => ({
           symbol,
-          source: 'FE' as const,
+          source: 'CHART' as const,
           instrumentType: 'ETF' as const,
         })),
       ];

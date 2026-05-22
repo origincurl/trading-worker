@@ -34,8 +34,8 @@ export class CollectorStatusService implements RoleStatusProvider {
   getMetrics(): HeartbeatMetrics {
     return {
       universe_size: this.universe.size(),
-      observed_admin_count: this.universe.observedAdminCount(),
       observed_fe_count: this.universe.observedFeCount(),
+      strategy_desired_count: this.universe.strategyDemandCount(),
       active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
       ws_connected: this.subscriber.isConnected(),
     };
@@ -53,8 +53,8 @@ export class CollectorStatusService implements RoleStatusProvider {
     const stats = this.ingestUsecase.snapshotStats();
     const openBuckets = this.candleBuilder.openBuckets().length;
     const universeSize = this.universe.size();
-    const adminCount = this.universe.observedAdminCount();
     const feCount = this.universe.observedFeCount();
+    const strategyCount = this.universe.strategyDemandCount();
     const lastRefresh = this.refreshUniverse.lastRefreshAt();
 
     const rejections = Array.from(this.candleBuilder.rejectionCounts())
@@ -69,7 +69,7 @@ export class CollectorStatusService implements RoleStatusProvider {
       `rejections=[${rejections}] ` +
       `lastTickAt=${last?.toISOString() ?? 'never'} lastObAt=${lastOb?.toISOString() ?? 'never'} ` +
       `lastCloseAt=${lastClose?.toISOString() ?? 'never'} ` +
-      `universeSize=${universeSize} observedAdmin=${adminCount} observedFe=${feCount} ` +
+      `universeSize=${universeSize} observedFe=${feCount} strategyDesired=${strategyCount} ` +
       `universeRefreshOk=${this.refreshUniverse.lastRefreshOk()} ` +
       `lastUniverseRefreshAt=${lastRefresh?.toISOString() ?? 'never'} ` +
       `wsConnected=${this.subscriber.isConnected()} uptime=${Math.floor((Date.now() - this.bootedAt) / 1000)}s`;

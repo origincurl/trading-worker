@@ -21,6 +21,7 @@ import { FxSnapshotService } from './service/fx-snapshot.service';
 import { MarketIndexSnapshotService } from './service/market-index-snapshot.service';
 import { MarketOrderbookService } from './service/market-orderbook.service';
 import { MarketTickService } from './service/market-tick.service';
+import { StrategyDemandService } from './service/strategy-demand.service';
 import { SubscriptionPlannerService } from './service/subscription-planner.service';
 import { UniverseService } from './service/universe.service';
 import { ChartCatchupConsumer } from './trigger/consumer/chart-catchup.consumer';
@@ -53,6 +54,7 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     MarketIndexSnapshotService,
     FxSnapshotService,
     UniverseService,
+    StrategyDemandService,
     SubscriptionPlannerService,
     CandleRepositoryImpl,
     DeadLetterRepositoryImpl,

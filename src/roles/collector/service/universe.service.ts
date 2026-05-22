@@ -1,12 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import type {
-  ObservedSymbolModel,
-  ObservedSymbolSource,
-} from '@shared/model/universe/observed-symbol.model';
+import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
 
 // Live universe = FE-observed symbols now; strategy demand joins the same
-// demand-driven path later. Admin watchlists are intentionally not direct
-// broker WS sources.
+// demand-driven path later. Admin watchlists are intentionally not broker WS
+// sources.
 // UniverseService normalizes (dedup by symbol — same symbol can appear in
 // both stock and ETF lists with different source flags) and exposes
 // per-source counts for heartbeat metrics. Dynamic collector ownership is
@@ -20,11 +17,9 @@ export class UniverseService {
 
   private currentSymbols: ObservedSymbolModel[] = [];
 
-  private adminCount = 0;
-
   private feCount = 0;
 
-  private bothCount = 0;
+  private strategyCount = 0;
 
   private lastAppliedAt: Date | null = null;
 
@@ -42,59 +37,65 @@ export class UniverseService {
     return this.currentSymbols.length;
   }
 
-  observedAdminCount(): number {
-    return this.adminCount;
-  }
-
   observedFeCount(): number {
     return this.feCount;
+  }
+
+  strategyDemandCount(): number {
+    return this.strategyCount;
   }
 
   lastAppliedAtMs(): number | null {
     return this.lastAppliedAt?.getTime() ?? null;
   }
 
-  // Replaces the in-memory universe with the union of active demand sources.
-  // Admin args are kept for compatibility with the source-counter model but
-  // normal refresh passes them empty. Returns all normalized symbols before
-  // collector ownership assignment.
-  apply(
-    adminStocks: readonly ObservedSymbolModel[],
-    adminEtfs: readonly ObservedSymbolModel[],
-    feSymbols: readonly ObservedSymbolModel[],
+  // Builds the normalized global demand set without mutating current worker
+  // ownership. RefreshUniverseUsecase uses this before shard assignment.
+  normalizeDemand(
+    chartSymbols: readonly ObservedSymbolModel[],
+    strategySymbols: readonly ObservedSymbolModel[],
   ): ObservedSymbolModel[] {
-    const merged = this.normalize([...adminStocks, ...adminEtfs, ...feSymbols]);
+    return this.normalize([...chartSymbols, ...strategySymbols]);
+  }
 
-    this.adminCount = this.countSource(merged, 'ADMIN');
+  // Replaces the in-memory universe atomically with the worker-owned subset of
+  // the current global demand snapshot. currentSymbols is never set to the
+  // global cluster universe, so frame filtering cannot briefly see symbols
+  // owned by another collector.
+  applyAssignedSnapshot(
+    chartSymbols: readonly ObservedSymbolModel[],
+    strategySymbols: readonly ObservedSymbolModel[],
+    assignedSymbols: readonly string[],
+  ): number {
+    const merged = this.normalizeDemand(chartSymbols, strategySymbols);
+    const assigned = new Set(assignedSymbols);
+    const current = merged.filter((symbol) => assigned.has(symbol.symbol));
 
-    this.feCount = this.countSource(merged, 'FE');
+    this.feCount = this.countSource(merged, 'CHART');
 
-    this.bothCount = this.countSource(merged, 'BOTH');
+    this.strategyCount = this.countSource(merged, 'STRATEGY');
 
     this.desiredSymbols = merged;
 
-    return merged;
-  }
-
-  applyAssigned(symbols: readonly string[]): number {
-    const assigned = new Set(symbols);
-
-    this.currentSymbols = this.currentSymbolsFromAssigned(assigned);
+    this.currentSymbols = current;
 
     this.lastAppliedAt = new Date();
 
-    this.logger.log(`universe assigned: assigned=${this.currentSymbols.length}`);
+    this.logger.log(`universe assigned: global=${merged.length} assigned=${current.length}`);
 
     return this.currentSymbols.length;
   }
 
-  private countSource(list: readonly ObservedSymbolModel[], source: ObservedSymbolSource): number {
-    return list.reduce((acc, s) => (s.source === source ? acc + 1 : acc), 0);
+  private countSource(list: readonly ObservedSymbolModel[], source: 'CHART' | 'STRATEGY'): number {
+    return list.reduce((acc, symbol) => {
+      if (symbol.source === source || symbol.source === 'BOTH') return acc + 1;
+
+      return acc;
+    }, 0);
   }
 
-  // Dedup by symbol. When the same symbol appears with different source
-  // flags we promote to BOTH. Sort deterministically so the downstream
-  // gateway SUB diff is stable across refreshes.
+  // Dedup by symbol. Sort deterministically so the downstream gateway SUB diff
+  // is stable across refreshes.
   private normalize(entries: readonly ObservedSymbolModel[]): ObservedSymbolModel[] {
     const byKey = new Map<string, ObservedSymbolModel>();
 
@@ -109,20 +110,13 @@ export class UniverseService {
         continue;
       }
 
-      const promotedSource: ObservedSymbolSource =
-        existing.source === entry.source ? existing.source : 'BOTH';
-
       byKey.set(entry.symbol, {
         symbol: entry.symbol,
-        source: promotedSource,
+        source: existing.source === entry.source ? existing.source : 'BOTH',
         instrumentType: existing.instrumentType === 'STOCK' ? 'STOCK' : entry.instrumentType,
       });
     }
 
     return Array.from(byKey.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
-  }
-
-  private currentSymbolsFromAssigned(assigned: ReadonlySet<string>): ObservedSymbolModel[] {
-    return this.desiredSymbols.filter((symbol) => assigned.has(symbol.symbol));
   }
 }

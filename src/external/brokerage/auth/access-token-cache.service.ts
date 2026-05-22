@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import {
   KiwoomTokenService,
   type AccessTokenBundle,
@@ -6,6 +6,8 @@ import {
 import { redactPotentialSecrets } from '@common/util/redact.util';
 import type { BrokerageCredentialMaterial } from '../credential/brokerage-credential-material';
 import { CredentialCooldownService } from '../credential/credential-cooldown.service';
+import { COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY } from '@shared/persistence/collector-credential/collector-credential-limit.token';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 
 const REFRESH_BUFFER_MS = 5 * 60_000;
 const AUTH_FAIL_COOLDOWN_MS = 5 * 60_000;
@@ -30,6 +32,8 @@ export class AccessTokenCacheService {
   constructor(
     private readonly tokenService: KiwoomTokenService,
     private readonly cooldown: CredentialCooldownService,
+    @Inject(COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY)
+    private readonly collectorRuntimeState: CollectorCredentialLimitRepository,
   ) {}
 
   // Returns a valid access token for `material.credentialId`. If a cache
@@ -73,6 +77,7 @@ export class AccessTokenCacheService {
         : await this.tokenService.issueAccessToken(material);
 
       this.cache.set(material.credentialId, { material, bundle });
+      await this.markCollectorSuccess(material);
 
       return bundle.accessToken;
     } catch (err) {
@@ -85,15 +90,18 @@ export class AccessTokenCacheService {
           const bundle = await this.tokenService.issueAccessToken(material);
 
           this.cache.set(material.credentialId, { material, bundle });
+          await this.markCollectorSuccess(material);
 
           return bundle.accessToken;
         } catch (issueErr) {
           this.cooldown.setCooldown(
             material.credentialId,
             AUTH_FAIL_COOLDOWN_MS,
-            redactPotentialSecrets(issueErr instanceof Error ? issueErr.message : String(issueErr)) ??
-              'token issue failed',
+            redactPotentialSecrets(
+              issueErr instanceof Error ? issueErr.message : String(issueErr),
+            ) ?? 'token issue failed',
           );
+          await this.markCollectorFailure(material, issueErr);
 
           throw issueErr;
         }
@@ -102,10 +110,87 @@ export class AccessTokenCacheService {
       this.cooldown.setCooldown(
         material.credentialId,
         AUTH_FAIL_COOLDOWN_MS,
-        redactPotentialSecrets(err instanceof Error ? err.message : String(err)) ?? 'token issue failed',
+        redactPotentialSecrets(err instanceof Error ? err.message : String(err)) ??
+          'token issue failed',
       );
+      await this.markCollectorFailure(material, err);
 
       throw err;
     }
   }
+
+  private async markCollectorFailure(
+    material: BrokerageCredentialMaterial,
+    err: unknown,
+  ): Promise<void> {
+    if (material.kind !== 'collector') return;
+
+    if (isBrokerRateLimited(err)) {
+      await this.collectorRuntimeState.markRateLimited({
+        credentialId: material.credentialId,
+        reason: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    if (!isBrokerAuthFailure(err)) return;
+
+    await this.collectorRuntimeState.markAuthFailed({
+      credentialId: material.credentialId,
+      source: 'TOKEN',
+      reason: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  private async markCollectorSuccess(material: BrokerageCredentialMaterial): Promise<void> {
+    if (material.kind !== 'collector') return;
+
+    await this.collectorRuntimeState.markSuccess({
+      credentialId: material.credentialId,
+      source: 'TOKEN',
+    });
+  }
+}
+
+function isBrokerRateLimited(err: unknown): boolean {
+  if (!(err instanceof Error) || !('details' in err)) return false;
+
+  const details = err.details as Record<string, unknown> | undefined;
+  const httpStatus = details?.httpStatus;
+  const returnCode = String(details?.returnCode ?? '').toLowerCase();
+  const returnMsg = typeof details?.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    httpStatus === 429 ||
+    haystack.includes('rate') ||
+    haystack.includes('limit') ||
+    haystack.includes('too many') ||
+    haystack.includes('429') ||
+    haystack.includes('초과') ||
+    haystack.includes('과다')
+  );
+}
+
+function isBrokerAuthFailure(err: unknown): boolean {
+  if (!(err instanceof Error) || !('details' in err)) return false;
+
+  const details = err.details as Record<string, unknown> | undefined;
+  const httpStatus = details?.httpStatus;
+  const returnCode = String(details?.returnCode ?? '').toLowerCase();
+  const returnMsg = typeof details?.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    httpStatus === 401 ||
+    httpStatus === 403 ||
+    haystack.includes('auth') ||
+    haystack.includes('token') ||
+    haystack.includes('invalid') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('인증') ||
+    haystack.includes('토큰')
+  );
 }

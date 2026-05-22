@@ -68,14 +68,17 @@ export class KiwoomTokenService {
 
     const body = (await safeJson(response)) as KiwoomTokenResponse;
     const returnCode =
-      body.return_code === undefined || body.return_code === null
-        ? null
-        : String(body.return_code);
+      body.return_code === undefined || body.return_code === null ? null : String(body.return_code);
 
     if (!response.ok || (returnCode !== null && returnCode !== '0')) {
       throw new IntegrationError(
         body.return_msg ?? `Kiwoom token issue failed status=${response.status}`,
-        { credentialId: material.credentialId, httpStatus: response.status, returnCode },
+        {
+          credentialId: material.credentialId,
+          httpStatus: response.status,
+          returnCode,
+          returnMsg: body.return_msg,
+        },
       );
     }
 

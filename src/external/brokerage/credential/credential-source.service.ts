@@ -6,11 +6,11 @@ import { API_CREDENTIAL_REPOSITORY } from '@shared/persistence/api-credential/ap
 import type { ApiCredentialRepository } from '@shared/persistence/api-credential/api-credential.repository';
 import { COLLECTOR_CREDENTIAL_REPOSITORY } from '@shared/persistence/collector-credential/collector-credential.token';
 import type { CollectorCredentialRepository } from '@shared/persistence/collector-credential/collector-credential.repository';
+import { CollectorCredentialRuntimeStatus } from '@shared/persistence/collector-credential/collector-credential-limit.entity';
+import { COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY } from '@shared/persistence/collector-credential/collector-credential-limit.token';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 import type { Brokerage } from '@shared/model/account/brokerage.enum';
-import {
-  ApiCredentialStatus,
-  type MarketEnv,
-} from '@shared/model/api-credential/market-env.enum';
+import { ApiCredentialStatus, type MarketEnv } from '@shared/model/api-credential/market-env.enum';
 import { CredentialEncryptionService } from '@shared/crypto/credential-encryption.service';
 import type { BrokerageCredentialMaterial } from './brokerage-credential-material';
 import { CredentialCooldownService } from './credential-cooldown.service';
@@ -33,6 +33,8 @@ export class CredentialSourceService {
   constructor(
     @Inject(COLLECTOR_CREDENTIAL_REPOSITORY)
     private readonly collectorRepo: CollectorCredentialRepository,
+    @Inject(COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY)
+    private readonly collectorLimitRepo: CollectorCredentialLimitRepository,
     @Inject(ACCOUNT_CREDENTIAL_REPOSITORY)
     private readonly accountCredRepo: AccountCredentialRepository,
     @Inject(API_CREDENTIAL_REPOSITORY)
@@ -49,20 +51,39 @@ export class CredentialSourceService {
   async selectCollectorCredential(
     brokerage: Brokerage,
     marketEnv: MarketEnv,
+    endpoint: 'REST' | 'WS' = 'REST',
   ): Promise<BrokerageCredentialMaterial> {
     const all = await this.collectorRepo.findActive(brokerage, marketEnv);
-    const eligible = all.filter((c) => !this.cooldown.isOnCooldown(c.id));
+    const limitState = await this.collectorLimitRepo.findByCredentialIds(all.map((c) => c.id));
+    const now = Date.now();
+    const evaluated = all.map((credential) => ({
+      credential,
+      exclusionReason: this.collectorExclusionReason(credential.id, limitState, now, endpoint),
+      priority: this.collectorPriority(credential.id, limitState, endpoint),
+    }));
+    const eligibleItems = evaluated.filter((item) => item.exclusionReason === null);
+    const bestPriority = Math.min(...eligibleItems.map((item) => item.priority));
+    const eligible = eligibleItems
+      .filter((item) => item.priority === bestPriority)
+      .map((item) => item.credential);
 
     if (eligible.length === 0) {
       throw new DomainError(
         `no usable collector credential for brokerage=${brokerage} env=${marketEnv}`,
         'COLLECTOR_CREDENTIAL_EXHAUSTED',
-        { brokerage, marketEnv, totalActive: all.length },
+        {
+          brokerage,
+          marketEnv,
+          totalActive: all.length,
+          eligible: eligible.length,
+          exclusions: exclusionCounts(evaluated.map((item) => item.exclusionReason)),
+        },
       );
     }
 
     const cursorKey = `${brokerage}:${marketEnv}`;
-    const cursor = this.collectorCursor.get(cursorKey) ?? Math.floor(Math.random() * eligible.length);
+    const cursor =
+      this.collectorCursor.get(cursorKey) ?? Math.floor(Math.random() * eligible.length);
     const picked = eligible[cursor % eligible.length];
 
     this.collectorCursor.set(cursorKey, cursor + 1);
@@ -79,12 +100,49 @@ export class CredentialSourceService {
     }
 
     return {
+      kind: 'collector',
       credentialId: picked.id,
       brokerage: picked.brokerage,
       marketEnv: picked.marketEnv,
       appKey,
       appSecret,
     };
+  }
+
+  private collectorExclusionReason(
+    credentialId: number,
+    limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
+    now: number,
+    endpoint: 'REST' | 'WS',
+  ): string | null {
+    if (this.cooldown.isOnCooldown(credentialId)) return 'IN_MEMORY_COOLDOWN';
+
+    const policy = limitState.policies.get(credentialId);
+    if (policy && !policy.isEnabled) return 'POLICY_DISABLED';
+
+    const state = limitState.states.get(credentialId);
+    if (!state) return null;
+    const cooldownUntil = endpoint === 'REST' ? state.restCooldownUntil : state.wsCooldownUntil;
+    const status = endpoint === 'REST' ? state.restStatus : state.wsStatus;
+    if (cooldownUntil && cooldownUntil.getTime() > now) {
+      return 'COOLDOWN_PENDING';
+    }
+    if (status === CollectorCredentialRuntimeStatus.AuthFailed) return 'AUTH_FAILED';
+
+    return null;
+  }
+
+  private collectorPriority(
+    credentialId: number,
+    limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
+    endpoint: 'REST' | 'WS',
+  ): number {
+    const state = limitState.states.get(credentialId);
+    if (!state) return 0;
+    const status = endpoint === 'REST' ? state.restStatus : state.wsStatus;
+    if (status === CollectorCredentialRuntimeStatus.Active) return 0;
+
+    return 1;
   }
 
   // Account-scoped pool. Used by tracker + executor — every call must
@@ -138,6 +196,7 @@ export class CredentialSourceService {
     }
 
     return {
+      kind: 'executor',
       credentialId: api.id,
       brokerage: picked.brokerage,
       marketEnv: picked.marketEnv,
@@ -145,4 +204,13 @@ export class CredentialSourceService {
       appSecret,
     };
   }
+}
+
+function exclusionCounts(reasons: readonly (string | null)[]): Record<string, number> {
+  return reasons.reduce<Record<string, number>>((acc, reason) => {
+    if (!reason) return acc;
+    acc[reason] = (acc[reason] ?? 0) + 1;
+
+    return acc;
+  }, {});
 }

@@ -24,6 +24,11 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
 
   async onApplicationBootstrap(): Promise<void> {
     if (!this.repo) return;
+    if (process.env.NODE_ENV === 'production') {
+      this.logger.log('production mode: skipping market_candles bootstrap DDL; use migrations');
+
+      return;
+    }
     await this.ensureMarketCandlesTable();
   }
 
@@ -47,14 +52,14 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
           provider, market_env, symbol, interval_type, candle_time, bucket_end,
           open, high, low, close, volume, last_source_ts, market, tick_count,
           first_source_ts, cumulative_volume_first, cumulative_volume_last,
-          cumulative_volume_anomalies, data_source, updated_at
+          cumulative_volume_anomalies, data_source, chart_source, chart_market, updated_at
         )
         VALUES (
           $1, $2, $3, $4, $5, $6,
           $7, $8, $9, $10, $11, $12, $13, $14,
-          $15, $16, $17, $18, $19, NOW()
+          $15, $16, $17, $18, $19, $20, $21, NOW()
         )
-        ON CONFLICT (provider, market_env, symbol, interval_type, candle_time)
+        ON CONFLICT (provider, market_env, symbol, interval_type, candle_time, chart_market)
         DO UPDATE SET
           bucket_end = EXCLUDED.bucket_end,
           open = EXCLUDED.open,
@@ -70,9 +75,14 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
           cumulative_volume_last = EXCLUDED.cumulative_volume_last,
           cumulative_volume_anomalies = EXCLUDED.cumulative_volume_anomalies,
           data_source = EXCLUDED.data_source,
+          chart_source = EXCLUDED.chart_source,
+          chart_market = EXCLUDED.chart_market,
           updated_at = NOW()
         WHERE COALESCE(market_candles.data_source, '') <> 'realtime'
            OR EXCLUDED.data_source = 'realtime'
+        -- TODO(broker-chart-AL): when AL parser lands, replace same-priority
+        -- realtime last-writer-wins with chart_source priority
+        -- (broker_chart_AL > trade_tick_0B > unknown).
         RETURNING (xmax = 0) AS inserted
       `,
       [
@@ -95,6 +105,8 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
         payload.cumulativeVolumeLast,
         payload.cumulativeVolumeAnomalies,
         payload.dataSource,
+        payload.chartSource,
+        payload.chartMarket,
       ],
     )) as Array<{ inserted: boolean }>;
 
@@ -117,8 +129,9 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
         low numeric(18, 4) NOT NULL,
         close numeric(18, 4) NOT NULL,
         volume numeric(24, 4) NOT NULL,
+        chart_market varchar(16) NOT NULL DEFAULT 'KRW',
         last_source_ts timestamptz NULL,
-        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time)
+        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)
       )
     `);
     await this.dataSource.query(`
@@ -146,6 +159,44 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS data_source varchar(16) NULL
     `);
     await this.dataSource.query(`
+      ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_source varchar(32) NOT NULL DEFAULT 'unknown'
+    `);
+    await this.dataSource.query(`
+      ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_market varchar(16) NOT NULL DEFAULT 'UNKNOWN'
+    `);
+    await this.dataSource.query(`
+      UPDATE market_candles
+      SET chart_market = 'KRW'
+      WHERE chart_market IS NULL OR chart_market = 'UNKNOWN'
+    `);
+    await this.dataSource.query(`
+      DO $$
+      DECLARE
+        existing_pkey text;
+        existing_pkey_def text;
+        desired_pkey_def text := 'PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market)';
+      BEGIN
+        SELECT conname, pg_get_constraintdef(oid)
+        INTO existing_pkey, existing_pkey_def
+        FROM pg_constraint
+        WHERE conrelid = 'market_candles'::regclass
+          AND contype = 'p'
+        LIMIT 1;
+
+        IF existing_pkey_def = desired_pkey_def THEN
+          RETURN;
+        END IF;
+
+        IF existing_pkey IS NOT NULL THEN
+          EXECUTE format('ALTER TABLE market_candles DROP CONSTRAINT %I', existing_pkey);
+        END IF;
+
+        ALTER TABLE market_candles
+        ADD CONSTRAINT market_candles_pkey
+        PRIMARY KEY (provider, market_env, symbol, interval_type, candle_time, chart_market);
+      END $$;
+    `);
+    await this.dataSource.query(`
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT NOW()
     `);
     await this.dataSource.query(`
@@ -153,7 +204,7 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
     `);
     await this.dataSource.query(`
       CREATE INDEX IF NOT EXISTS ix_market_candles_query
-      ON market_candles (provider, market_env, symbol, interval_type, candle_time)
+      ON market_candles (provider, market_env, symbol, interval_type, chart_market, candle_time)
     `);
   }
 }

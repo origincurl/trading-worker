@@ -45,6 +45,8 @@ export class CandleCloseService {
       marketEnv: candle.marketEnv,
       symbol: candle.symbol,
       market: candle.market,
+      chartSource: candle.chartSource,
+      chartMarket: candle.chartMarket,
       intervalType: '1m',
       bucketStart: candle.bucketStart.toISOString(),
       bucketEnd: candle.bucketEnd.toISOString(),

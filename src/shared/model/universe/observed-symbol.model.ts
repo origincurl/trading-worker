@@ -1,9 +1,10 @@
-// Single entry in the collector's observation universe. `source` records
-// who put it there (admin-curated, FE-observed, or both) so collector can
-// emit per-source metrics in its heartbeat. `instrumentType` lets the
-// universe layer route stock and ETF symbols through the same channels
-// while preserving metadata for downstream consumers.
-export type ObservedSymbolSource = 'ADMIN' | 'FE' | 'BOTH';
+// Single entry in the collector's observation universe. `source` is retained
+// for source attribution. Canonical WS demand comes from FE chart observation
+// and active strategy demand. Admin-curated symbols must not feed the broker WS
+// universe. `instrumentType` lets the universe layer route stock and ETF
+// symbols through the same channels while preserving metadata for downstream
+// consumers.
+export type ObservedSymbolSource = 'CHART' | 'STRATEGY' | 'BOTH';
 
 export type ObservedInstrumentType = 'STOCK' | 'ETF';
 

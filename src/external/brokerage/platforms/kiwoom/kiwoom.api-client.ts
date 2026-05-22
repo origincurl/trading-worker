@@ -7,6 +7,7 @@ import type {
   CredentialUsageContext,
   CredentialUsageService,
 } from '../../credential/credential-usage.service';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 
 const DEFAULT_REST_TIMEOUT_MS = 20_000;
 
@@ -21,6 +22,7 @@ export type KiwoomTokenResult =
   | {
       readonly token: string;
       readonly credential: CredentialUsageContext;
+      readonly invalidate?: () => void;
     };
 
 export type KiwoomTokenSupplier = () => Promise<KiwoomTokenResult>;
@@ -31,6 +33,7 @@ export interface KiwoomApiClientOptions {
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly rateLimiter: RateLimiter;
   readonly usage?: CredentialUsageService;
+  readonly collectorRuntimeState?: CollectorCredentialLimitRepository;
 }
 
 export interface KiwoomRequestOptions<TRequest> {
@@ -64,9 +67,7 @@ export class KiwoomApiClient {
     return this.opts.profile;
   }
 
-  async request<TRequest, TResponse>(
-    options: KiwoomRequestOptions<TRequest>,
-  ): Promise<TResponse> {
+  async request<TRequest, TResponse>(options: KiwoomRequestOptions<TRequest>): Promise<TResponse> {
     const { apiId, endpointPath, body, contYn, nextKey, tokenSupplier } = options;
 
     if (!this.opts.restUrl) {
@@ -80,12 +81,16 @@ export class KiwoomApiClient {
     const path = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
     const url = `${restUrl}${path}`;
 
-    const tokenResult = normalizeTokenResult(await (tokenSupplier ?? this.opts.tokenSupplier)());
+    const resolveToken = tokenSupplier ?? this.opts.tokenSupplier;
+    const initialTokenResult = normalizeTokenResult(await resolveToken());
 
     return this.opts.rateLimiter.run(async () => {
       let response: Response;
 
-      const request = async (): Promise<TResponse> => {
+      const request = async (
+        tokenResult: NormalizedKiwoomTokenResult,
+        allowTokenRetry: boolean,
+      ): Promise<TResponse> => {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), DEFAULT_REST_TIMEOUT_MS);
 
@@ -141,9 +146,23 @@ export class KiwoomApiClient {
 
         if (!response.ok) {
           const { returnCode, returnMsg } = extractReturnFields(parsed);
+          if (allowTokenRetry && shouldRetryWithFreshToken(tokenResult, returnCode, returnMsg)) {
+            const nextTokenResult = await refreshTokenResult(resolveToken, tokenResult);
+
+            if (nextTokenResult) return await request(nextTokenResult, false);
+          }
+
+          await this.recordFailedResponse(tokenResult.credential, {
+            httpStatus: response.status,
+            returnCode,
+            returnMsg,
+            retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
+            apiId,
+            endpointPath,
+          });
 
           throw new IntegrationError(
-              `Kiwoom REST HTTP ${response.status} apiId=${apiId} returnCode=${String(returnCode ?? '')} returnMsg=${redactPotentialSecrets(returnMsg) ?? ''}`,
+            `Kiwoom REST HTTP ${response.status} apiId=${apiId} returnCode=${String(returnCode ?? '')} returnMsg=${redactPotentialSecrets(returnMsg) ?? ''}`,
             {
               profile: this.opts.profile,
               apiId,
@@ -166,6 +185,19 @@ export class KiwoomApiClient {
           returnCode !== 0 &&
           returnCode !== '0'
         ) {
+          if (allowTokenRetry && shouldRetryWithFreshToken(tokenResult, returnCode, returnMsg)) {
+            const nextTokenResult = await refreshTokenResult(resolveToken, tokenResult);
+
+            if (nextTokenResult) return await request(nextTokenResult, false);
+          }
+
+          await this.recordRejectedResponse(tokenResult.credential, {
+            returnCode,
+            returnMsg,
+            apiId,
+            endpointPath,
+          });
+
           throw new IntegrationError(
             `Kiwoom REST returned non-zero return_code apiId=${apiId} returnCode=${String(returnCode)} returnMsg=${redactPotentialSecrets(returnMsg) ?? ''}`,
             {
@@ -178,29 +210,36 @@ export class KiwoomApiClient {
           );
         }
 
+        await this.recordSuccess(tokenResult.credential);
+
         this.logger.debug(`apiId=${apiId} path=${path} status=${response.status} ok`);
 
         return parsed as TResponse;
       };
 
       try {
-        if (tokenResult.credential && this.opts.usage) {
+        if (initialTokenResult.credential && this.opts.usage) {
           return await this.opts.usage.runRest(
             this.opts.profile,
-            tokenResult.credential,
+            initialTokenResult.credential,
             endpointLabel(endpointPath),
-            request,
+            () => request(initialTokenResult, true),
           );
         }
 
-        if (!tokenResult.credential && this.opts.usage && !this.warnedMissingCredentialContext) {
+        if (
+          !initialTokenResult.credential &&
+          this.opts.usage &&
+          !this.warnedMissingCredentialContext
+        ) {
           this.warnedMissingCredentialContext = true;
+
           this.logger.warn(
             `Kiwoom REST usage tracking skipped because token supplier returned no credential context apiId=${apiId} path=${path}`,
           );
         }
 
-        return await request();
+        return await request(initialTokenResult, true);
       } catch (err) {
         if (err instanceof DomainError) throw err;
 
@@ -211,17 +250,100 @@ export class KiwoomApiClient {
       }
     });
   }
+
+  private async recordFailedResponse(
+    credential: CredentialUsageContext | null,
+    input: {
+      readonly httpStatus: number;
+      readonly returnCode: number | string | undefined;
+      readonly returnMsg: string | undefined;
+      readonly retryAfterMs: number | null;
+      readonly apiId: string;
+      readonly endpointPath: string;
+    },
+  ): Promise<void> {
+    if (!this.isCollectorCredential(credential)) return;
+
+    const reason = `REST ${input.endpointPath} apiId=${input.apiId} status=${input.httpStatus} returnCode=${String(input.returnCode ?? '')} returnMsg=${redactPotentialSecrets(input.returnMsg) ?? ''}`;
+
+    if (input.httpStatus === 429 || looksRateLimited(input.returnCode, input.returnMsg)) {
+      await this.opts.collectorRuntimeState?.markRateLimited({
+        credentialId: credential.credentialId,
+        retryAfterMs: input.retryAfterMs,
+        reason,
+      });
+
+      return;
+    }
+
+    if (input.httpStatus === 401 || input.httpStatus === 403) {
+      await this.opts.collectorRuntimeState?.markAuthFailed({
+        credentialId: credential.credentialId,
+        source: 'REST',
+        reason,
+      });
+    }
+  }
+
+  private async recordRejectedResponse(
+    credential: CredentialUsageContext | null,
+    input: {
+      readonly returnCode: number | string;
+      readonly returnMsg: string | undefined;
+      readonly apiId: string;
+      readonly endpointPath: string;
+    },
+  ): Promise<void> {
+    if (!this.isCollectorCredential(credential)) return;
+
+    const reason = `REST ${input.endpointPath} apiId=${input.apiId} returnCode=${String(input.returnCode)} returnMsg=${redactPotentialSecrets(input.returnMsg) ?? ''}`;
+
+    if (looksRateLimited(input.returnCode, input.returnMsg)) {
+      await this.opts.collectorRuntimeState?.markRateLimited({
+        credentialId: credential.credentialId,
+        reason,
+      });
+
+      return;
+    }
+
+    if (looksAuthFailed(input.returnCode, input.returnMsg)) {
+      await this.opts.collectorRuntimeState?.markAuthFailed({
+        credentialId: credential.credentialId,
+        source: 'REST',
+        reason,
+      });
+    }
+  }
+
+  private async recordSuccess(credential: CredentialUsageContext | null): Promise<void> {
+    if (!this.isCollectorCredential(credential)) return;
+
+    await this.opts.collectorRuntimeState?.markSuccess({
+      credentialId: credential.credentialId,
+      source: 'REST',
+    });
+  }
+
+  private isCollectorCredential(
+    credential: CredentialUsageContext | null,
+  ): credential is CredentialUsageContext {
+    return credential?.kind === 'collector';
+  }
 }
 
-export function normalizeTokenResult(value: KiwoomTokenResult): {
+type NormalizedKiwoomTokenResult = {
   readonly token: string;
   readonly credential: CredentialUsageContext | null;
-} {
+  readonly invalidate?: () => void;
+};
+
+export function normalizeTokenResult(value: KiwoomTokenResult): NormalizedKiwoomTokenResult {
   if (typeof value === 'string') {
     return { token: value, credential: null };
   }
 
-  return { token: value.token, credential: value.credential };
+  return { token: value.token, credential: value.credential, invalidate: value.invalidate };
 }
 
 function endpointLabel(endpointPath: string): string {
@@ -245,9 +367,86 @@ function extractReturnFields(parsed: unknown): {
   const rc = obj.return_code;
   const rm = obj.return_msg;
 
-  const returnCode =
-    typeof rc === 'number' || typeof rc === 'string' ? rc : undefined;
+  const returnCode = typeof rc === 'number' || typeof rc === 'string' ? rc : undefined;
   const returnMsg = typeof rm === 'string' ? rm : undefined;
 
   return { returnCode, returnMsg };
+}
+
+function parseRetryAfterMs(value: string | null): number | null {
+  if (!value) return null;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.floor(seconds * 1000);
+
+  const dateMs = Date.parse(value);
+  if (!Number.isFinite(dateMs)) return null;
+
+  return Math.max(0, dateMs - Date.now());
+}
+
+function looksRateLimited(
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  const haystack = `${String(returnCode ?? '')} ${returnMsg ?? ''}`.toLowerCase();
+
+  return (
+    haystack.includes('rate') ||
+    haystack.includes('limit') ||
+    haystack.includes('too many') ||
+    haystack.includes('429') ||
+    haystack.includes('초과') ||
+    haystack.includes('과다')
+  );
+}
+
+function looksAuthFailed(
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  const haystack = `${String(returnCode ?? '')} ${returnMsg ?? ''}`.toLowerCase();
+
+  return (
+    haystack.includes('auth') ||
+    haystack.includes('token') ||
+    haystack.includes('invalid') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('인증') ||
+    haystack.includes('토큰')
+  );
+}
+
+function looksTokenRejected(
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  const haystack = `${String(returnCode ?? '')} ${returnMsg ?? ''}`.toLowerCase();
+
+  return (
+    haystack.includes('token') ||
+    haystack.includes('토큰') ||
+    haystack.includes('expired') ||
+    haystack.includes('만료')
+  );
+}
+
+function shouldRetryWithFreshToken(
+  tokenResult: NormalizedKiwoomTokenResult,
+  returnCode: number | string | undefined,
+  returnMsg: string | undefined,
+): boolean {
+  return Boolean(tokenResult.invalidate && looksTokenRejected(returnCode, returnMsg));
+}
+
+async function refreshTokenResult(
+  resolveToken: KiwoomTokenSupplier,
+  current: NormalizedKiwoomTokenResult,
+): Promise<NormalizedKiwoomTokenResult | null> {
+  current.invalidate?.();
+
+  const next = normalizeTokenResult(await resolveToken());
+  if (!next.token || next.token === current.token) return null;
+
+  return next;
 }

@@ -92,10 +92,13 @@ export class ChartCatchupRequestSubscriber
       return;
     }
 
-    // jobId = requestId so duplicate publishes collapse to one job.
+    // BE already guards each deterministic requestId with a short Redis
+    // lock. Let BullMQ assign a fresh id so a failed gap can be retried by
+    // the next chart snapshot instead of being blocked by an old completed
+    // or failed job with the same requestId.
     await this.queue.enqueue<ChartCatchupRequest>(QUEUE_NAME, payload, {
-      jobId: payload.requestId,
       attempts: 3,
+      backoff: { type: 'exponential', delayMs: 1_000 },
     });
 
     this.logger.debug(

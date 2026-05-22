@@ -12,6 +12,12 @@ export interface CredentialUsageContext {
   readonly accountId?: number;
 }
 
+export interface CredentialUsageHistoryEntry {
+  readonly at: string;
+  readonly level: 'info' | 'warn' | 'error';
+  readonly message: string;
+}
+
 export interface CredentialUsageSnapshot {
   readonly key: string;
   readonly kind: CredentialUsageKind;
@@ -30,6 +36,8 @@ export interface CredentialUsageSnapshot {
   readonly lastSuccessAt: string | null;
   readonly lastFailureAt: string | null;
   readonly lastError: string | null;
+  readonly wsSymbolList: readonly string[];
+  readonly history: readonly CredentialUsageHistoryEntry[];
 }
 
 interface MutableStats {
@@ -49,6 +57,8 @@ interface MutableStats {
   lastSuccessAt: Date | null;
   lastFailureAt: Date | null;
   lastError: string | null;
+  wsSymbolList: string[];
+  history: CredentialUsageHistoryEntry[];
 }
 
 interface RateLimitConfig {
@@ -73,6 +83,8 @@ const DEFAULT_LIMITS: Record<CredentialUsageKind, RateLimitConfig> = {
   executor: { capacity: 5, refillPerSecond: 5, maxConcurrent: 2 },
 };
 
+const MAX_HISTORY_ENTRIES = 10;
+
 @Injectable()
 export class CredentialUsageService {
   private readonly stats = new Map<string, MutableStats>();
@@ -94,6 +106,7 @@ export class CredentialUsageService {
 
     stats.requests += 1;
     stats.lastUsedAt = new Date();
+    this.pushHistory(stats, 'info', `REST ${endpoint} request queued`);
 
     try {
       await limiter.acquire();
@@ -102,6 +115,7 @@ export class CredentialUsageService {
       stats.failures += 1;
       stats.lastFailureAt = new Date();
       stats.lastError = redactPotentialSecrets(err instanceof Error ? err.message : String(err));
+      this.pushHistory(stats, 'warn', `REST ${endpoint} rate-limited: ${stats.lastError}`);
       throw err;
     }
 
@@ -113,12 +127,14 @@ export class CredentialUsageService {
       stats.successes += 1;
       stats.lastSuccessAt = new Date();
       stats.lastError = null;
+      this.pushHistory(stats, 'info', `REST ${endpoint} success`);
 
       return result;
     } catch (err) {
       stats.failures += 1;
       stats.lastFailureAt = new Date();
       stats.lastError = redactPotentialSecrets(err instanceof Error ? err.message : String(err));
+      this.pushHistory(stats, 'error', `REST ${endpoint} failed: ${stats.lastError}`);
       throw err;
     } finally {
       stats.inFlight = Math.max(0, stats.inFlight - 1);
@@ -130,13 +146,16 @@ export class CredentialUsageService {
     profile: BrokerageVendorProfile,
     credential: CredentialUsageContext,
     symbols: number,
+    symbolList: readonly string[] = [],
   ): void {
     const stats = this.getStats(profile, credential, 'WS');
 
     stats.wsConnections = 1;
     stats.wsSymbols = symbols;
+    stats.wsSymbolList = normalizeSymbolList(symbolList);
     stats.lastUsedAt = new Date();
     stats.lastSuccessAt = new Date();
+    this.pushHistory(stats, 'info', `WS connected; symbols=${symbols}`);
   }
 
   markWsDisconnected(profile: BrokerageVendorProfile, credential: CredentialUsageContext): void {
@@ -144,18 +163,23 @@ export class CredentialUsageService {
 
     stats.wsConnections = 0;
     stats.wsSymbols = 0;
+    stats.wsSymbolList = [];
     stats.lastUsedAt = new Date();
+    this.pushHistory(stats, 'warn', 'WS disconnected');
   }
 
   markWsSymbols(
     profile: BrokerageVendorProfile,
     credential: CredentialUsageContext,
     symbols: number,
+    symbolList: readonly string[] = [],
   ): void {
     const stats = this.getStats(profile, credential, 'WS');
 
     stats.wsSymbols = symbols;
+    stats.wsSymbolList = normalizeSymbolList(symbolList);
     stats.lastUsedAt = new Date();
+    this.pushHistory(stats, 'info', `WS symbols changed; symbols=${symbols}`);
   }
 
   snapshot(): CredentialUsageSnapshot[] {
@@ -178,6 +202,8 @@ export class CredentialUsageService {
         lastSuccessAt: value.lastSuccessAt?.toISOString() ?? null,
         lastFailureAt: value.lastFailureAt?.toISOString() ?? null,
         lastError: value.lastError,
+        wsSymbolList: [...value.wsSymbolList],
+        history: [...value.history],
       }))
       .sort((a, b) => a.key.localeCompare(b.key));
   }
@@ -209,6 +235,8 @@ export class CredentialUsageService {
       lastSuccessAt: null,
       lastFailureAt: null,
       lastError: null,
+      wsSymbolList: [],
+      history: [],
     };
 
     this.stats.set(key, created);
@@ -281,6 +309,22 @@ export class CredentialUsageService {
   ): string {
     return `${profile}:${credential.kind}:${credential.credentialId}:${credential.accountId ?? 'none'}:${endpoint}`;
   }
+
+  private pushHistory(stats: MutableStats, level: CredentialUsageHistoryEntry['level'], message: string): void {
+    stats.history.push({
+      at: new Date().toISOString(),
+      level,
+      message,
+    });
+
+    if (stats.history.length > MAX_HISTORY_ENTRIES) {
+      stats.history.splice(0, stats.history.length - MAX_HISTORY_ENTRIES);
+    }
+  }
+}
+
+function normalizeSymbolList(symbols: readonly string[]): string[] {
+  return Array.from(new Set(symbols.map((symbol) => symbol.trim()).filter(Boolean))).sort();
 }
 
 function normalizeLimitConfig(

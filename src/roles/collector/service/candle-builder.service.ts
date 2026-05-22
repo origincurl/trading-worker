@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+import { KiwoomMarketEnv } from '@config/kiwoom.config';
+import { resolveMarketRealtimeProfile } from '@roles/collector/market-realtime-profile';
 import type { MarketTickPayload } from '@shared/event/market-tick.event';
 import { addMinutes, floorToKstMinute, type CandleModel } from './candle.model';
 import { TickRejection, type TickRejectionCode } from './tick-rejection';
@@ -119,6 +121,10 @@ function openCandle(tick: MarketTickPayload, sourceTs: Date, bucketStart: Date):
     symbol: tick.symbol,
     marketEnv: tick.marketEnv,
     market: tick.market,
+    chartSource: 'trade_tick_0B',
+    chartMarket: resolveMarketRealtimeProfile(
+      tick.marketEnv === 'production' ? KiwoomMarketEnv.Production : KiwoomMarketEnv.Mock,
+    ).chartMarket,
     bucketStart,
     bucketEnd: addMinutes(bucketStart, 1),
     open: price,

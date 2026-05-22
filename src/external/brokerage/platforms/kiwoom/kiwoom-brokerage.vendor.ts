@@ -1,14 +1,22 @@
 import { Logger } from '@nestjs/common';
 import { DomainError, IntegrationError, NotImplementedError } from '@common/error/domain.error';
+import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
 import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import {
+  MARKET_INDEX_CODES,
+  MARKET_INDEX_NAMES,
+  type MarketIndexSymbol,
+} from '@shared/event/market-index.event';
 import type { BrokerageVendorProfile } from '../../brokerage.token';
 import type {
   BrokerageVendor,
   CancelOrderInput,
   FetchChartCandlesInput,
+  FetchMarketIndexSnapshotsInput,
   GetAccountBalanceInput,
   GetPositionsInput,
   GetStockMasterListInput,
+  MarketIndexSnapshot,
   MarketDataFrameHandler,
   MarketDataFrameKind,
   MarketDataSubscription,
@@ -51,6 +59,7 @@ import type {
   CredentialUsageContext,
   CredentialUsageService,
 } from '../../credential/credential-usage.service';
+import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 
 export interface KiwoomBrokerageVendorOptions {
   readonly profile: BrokerageVendorProfile;
@@ -62,6 +71,7 @@ export interface KiwoomBrokerageVendorOptions {
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly accountTokenSupplier?: (accountId: number) => Promise<KiwoomTokenResult>;
   readonly usage?: CredentialUsageService;
+  readonly collectorRuntimeState?: CollectorCredentialLimitRepository;
   // Used by AccessTokenCacheService.invalidate when LOGIN keeps failing.
   // The supplier closure captures the credentialId — we surface a hook
   // here so the gateway can drop a cached token on auth rejection.
@@ -83,13 +93,17 @@ const DEFAULT_POST_LOGIN_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_INITIAL_DELAY_MS = 1_000;
 const DEFAULT_RECONNECT_MAX_DELAY_MS = 30_000;
 const DEFAULT_RECONNECT_MAX_ATTEMPTS = 0; // 0 = unlimited
+const KST_OFFSET_MS = 9 * 3_600_000;
+
+type KiwoomMarketIndexCurrentResponseContract = Record<string, unknown>;
 
 // Endpoint category paths. Kiwoom REST groups apiIds by domain category.
 // TODO(kiwoom-spec): verify each category against current Kiwoom REST docs.
 const PATH_ORDER = '/api/dostk/ordr';
 const PATH_ACCOUNT = '/api/dostk/acnt';
 const PATH_CHART = '/api/dostk/chart';
-const PATH_MARKET_COND = '/api/dostk/mrkcond';
+const PATH_SECTOR = '/api/dostk/sect';
+const PATH_STOCK_INFO = '/api/dostk/stkinfo';
 
 // apiId catalogue. Public Kiwoom REST values; flagged with TODO comments
 // where the mapping is uncertain.
@@ -102,6 +116,7 @@ const APIID_POSITIONS = 'kt00018';
 const APIID_CHART_MINUTE = 'ka10080';
 const APIID_CHART_DAILY = 'ka10081';
 const APIID_STOCK_MASTER = 'ka10099';
+const APIID_INDEX_CURRENT = 'ka20001';
 
 // Phase 6 market-data stream (collector-only) + Phase 6.8 auto-reconnect.
 // Phase 8: REST order paths and chart/master read paths wired against
@@ -254,10 +269,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     );
   }
 
-  async placeOrderForAccount(
-    accountId: number,
-    input: PlaceOrderInput,
-  ): Promise<OrderAckModel> {
+  async placeOrderForAccount(accountId: number, input: PlaceOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'placeOrderForAccount');
 
     // NOTE: the worker-internal accountId PK is unused for the vendor wire
@@ -306,25 +318,25 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     );
   }
 
-  async modifyOrderForAccount(
-    accountId: number,
-    input: ModifyOrderInput,
-  ): Promise<OrderAckModel> {
+  async modifyOrderForAccount(accountId: number, input: ModifyOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'modifyOrderForAccount');
 
     return this.executeModifyOrder(input, this.accountTokenSupplier(accountId));
   }
 
-  async fetchChartCandles(
-    input: FetchChartCandlesInput,
-  ): Promise<MarketCandleClosedPayload[]> {
+  async fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]> {
     try {
       const baseDt = toYyyyMmDd(input.toIso);
       const isMinute = input.intervalType === '1m';
       const apiId = isMinute ? APIID_CHART_MINUTE : APIID_CHART_DAILY;
       const body: FetchChartCandlesRequestContract = isMinute
-        ? { stkCd: input.symbol, baseDt, tic_scope: '1' /* 1분봉 */ }
-        : { stkCd: input.symbol, baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
+        ? {
+            stk_cd: input.symbol,
+            base_dt: baseDt,
+            tic_scope: '1' /* 1분봉 */,
+            upd_stkpc_tp: '1' /* 수정주가반영 */,
+          }
+        : { stk_cd: input.symbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
 
       const response = await this.opts.apiClient.request<
         FetchChartCandlesRequestContract,
@@ -336,8 +348,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       });
 
       const rows = isMinute
-        ? response.stk_min_pole_chart_qry ?? []
-        : response.stk_dt_pole_chart_qry ?? [];
+        ? (response.stk_min_pole_chart_qry ?? [])
+        : (response.stk_dt_pole_chart_qry ?? []);
 
       const fromMs = Date.parse(input.fromIso);
       const toMs = Date.parse(input.toIso);
@@ -345,18 +357,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       const out: MarketCandleClosedPayload[] = [];
 
       for (const row of rows) {
-        const bucketStartMs = parseKiwoomCandleTs(row, isMinute);
+        const bucketStartMs = parseKiwoomCandleTs(row, isMinute, baseDt);
 
         if (bucketStartMs === null) continue;
 
         // Half-open [from, to) window.
         if (bucketStartMs < fromMs || bucketStartMs >= toMs) continue;
 
-        const open = parseNumberOrNull(row.op ?? row.open_pric);
-        const high = parseNumberOrNull(row.hg ?? row.high_pric);
-        const low = parseNumberOrNull(row.lw ?? row.low_pric);
-        const close = parseNumberOrNull(row.cp ?? row.cur_prc);
-        const volume = parseNumberOrNull(row.tradeVolume ?? row.trd_qty ?? row.cntr_qty);
+        const open = parseKiwoomPriceOrNull(row.op ?? row.open_pric);
+        const high = parseKiwoomPriceOrNull(row.hg ?? row.high_pric);
+        const low = parseKiwoomPriceOrNull(row.lw ?? row.low_pric);
+        const close = parseKiwoomPriceOrNull(row.cp ?? row.cur_prc);
+        const volume = parseKiwoomAbsoluteNumberOrNull(
+          row.tradeVolume ?? row.trde_qty ?? row.trd_qty ?? row.cntr_qty,
+        );
 
         if (open === null || high === null || low === null || close === null) continue;
 
@@ -373,6 +387,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           marketEnv: input.marketEnv,
           symbol: input.symbol,
           market: 'unknown',
+          chartSource: 'broker_chart_REST',
+          chartMarket: input.chartMarket ?? 'KRW',
           intervalType: '1m',
           bucketStart,
           bucketEnd,
@@ -402,50 +418,113 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   async getStockMasterList(input: GetStockMasterListInput): Promise<StockMasterEntry[]> {
     void input.marketEnv;
 
-    // Kiwoom requires one call per market segment. Three best-effort
-    // segment codes — see the TODO in the request contract.
-    const segments: ReadonlyArray<{ mrktTp: string; marketCode: StockMasterEntry['marketCode'] }> =
-      [
-        { mrktTp: '0', marketCode: 'KOSPI' },
-        { mrktTp: '10', marketCode: 'KOSDAQ' },
-        { mrktTp: '8', marketCode: 'KONEX' },
-      ];
+    // Kiwoom's own guide documents 001/101, while mock/examples in the wild
+    // often use 0/10. Try the documented code first, then the legacy alias.
+    const segments: ReadonlyArray<{
+      mrktTps: readonly string[];
+      marketCode: StockMasterEntry['marketCode'];
+    }> = [
+      { mrktTps: ['001', '0'], marketCode: 'KOSPI' },
+      { mrktTps: ['101', '10'], marketCode: 'KOSDAQ' },
+      { mrktTps: ['50'], marketCode: 'KONEX' },
+    ];
 
     const out: StockMasterEntry[] = [];
+    const seen = new Set<string>();
 
     for (const segment of segments) {
+      let segmentRows = 0;
+
+      for (const mrktTp of segment.mrktTps) {
+        try {
+          const response = await this.opts.apiClient.request<
+            GetStockMasterListRequestContract,
+            GetStockMasterListResponseContract
+          >({
+            apiId: APIID_STOCK_MASTER,
+            endpointPath: PATH_STOCK_INFO,
+            body: { mrkt_tp: mrktTp },
+          });
+
+          const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
+            response.list ?? response.stk_lst ?? response.mst_lst ?? [];
+
+          for (const row of rows) {
+            const symbol = row.code ?? row.stkCd ?? row.stk_cd;
+            const name = row.name ?? row.stkNm ?? row.stk_nm;
+
+            if (!symbol || !name) continue;
+
+            const key = `${segment.marketCode}:${symbol}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+
+            out.push({
+              symbol,
+              name,
+              marketCode: segment.marketCode,
+              currency: row.currency ?? 'KRW',
+              isinSymbol: row.isin ?? row.isinCd ?? row.isin_cd,
+            });
+
+            segmentRows += 1;
+          }
+
+          if (segmentRows > 0) break;
+        } catch (err) {
+          // One market/code candidate failing shouldn't black-hole the whole sync.
+          this.logger.warn(
+            `getStockMasterList segment=${segment.marketCode} mrkt_tp=${mrktTp} failed: ${
+              err instanceof Error ? err.message : err
+            }`,
+          );
+        }
+      }
+
+      if (segmentRows === 0) {
+        this.logger.warn(`getStockMasterList segment=${segment.marketCode} returned no rows`);
+      }
+    }
+
+    return out;
+  }
+
+  async fetchMarketIndexSnapshots(
+    input: FetchMarketIndexSnapshotsInput,
+  ): Promise<MarketIndexSnapshot[]> {
+    const marketEnv = input.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK';
+    const out: MarketIndexSnapshot[] = [];
+
+    for (const symbol of input.symbols) {
+      const indexCode = MARKET_INDEX_CODES[symbol];
+
       try {
         const response = await this.opts.apiClient.request<
-          GetStockMasterListRequestContract,
-          GetStockMasterListResponseContract
+          { inds_cd: string; mrkt_tp: string },
+          KiwoomMarketIndexCurrentResponseContract
         >({
-          apiId: APIID_STOCK_MASTER,
-          endpointPath: PATH_MARKET_COND,
-          body: { mrktTp: segment.mrktTp },
+          apiId: APIID_INDEX_CURRENT,
+          endpointPath: PATH_SECTOR,
+          body: { inds_cd: indexCode, mrkt_tp: indexCode },
         });
+        const raw = normalizeIndexResponse(response, symbol);
 
-        const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
-          response.list ?? response.stk_lst ?? response.mst_lst ?? [];
-
-        for (const row of rows) {
-          const symbol = row.code ?? row.stkCd ?? row.stk_cd;
-          const name = row.name ?? row.stkNm ?? row.stk_nm;
-
-          if (!symbol || !name) continue;
-
-          out.push({
-            symbol,
-            name,
-            marketCode: segment.marketCode,
-            currency: row.currency ?? 'KRW',
-            isinSymbol: row.isin ?? row.isinCd ?? row.isin_cd,
-          });
-        }
+        out.push({
+          provider: 'KIWOOM',
+          marketEnv,
+          symbol,
+          name: pickString(raw, ['inds_nm', 'ind_nm', 'stk_nm']) ?? MARKET_INDEX_NAMES[symbol],
+          lastUpdatedAt: new Date().toISOString(),
+          value: parseSignedNumberAbs(pickValue(raw, ['cur_prc', 'now_pric', 'prc', 'close_pric'])),
+          change: parseSignedNumberStrict(pickValue(raw, ['pred_pre', 'pre', 'change'])),
+          changePct: parseSignedNumberStrict(pickValue(raw, ['flu_rt', 'pre_rt', 'change_rt'])),
+          volume: parseSignedNumberAbs(pickValue(raw, ['acc_trde_qty', 'trde_qty', 'volume'])),
+          tradeValue: parseSignedNumberAbs(
+            pickValue(raw, ['acc_trde_prica', 'trde_prica', 'trade_value']),
+          ),
+        });
       } catch (err) {
-        // One market failing shouldn't black-hole the whole sync.
-        this.logger.warn(
-          `getStockMasterList segment=${segment.marketCode} failed: ${err instanceof Error ? err.message : err}`,
-        );
+        throw this.wrapVendorError(err, 'fetchMarketIndexSnapshots', { symbol });
       }
     }
 
@@ -467,6 +546,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       this.loggedIn = false;
       if (this.activeWsCredential) {
         this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+
         this.activeWsCredential = null;
       }
 
@@ -729,7 +809,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private routeFrame(parsed: unknown): void {
     const trnm = isPlainObject(parsed) ? parsed.trnm : null;
 
-    if (trnm === 'LOGIN' || trnm === 'PING' || trnm === 'REG' || trnm === 'REMOVE') return;
+    if (trnm === 'PING') {
+      void this.opts.wsClient.send({ trnm: 'PING' }).catch((err) => {
+        this.logger.warn(`PING ack failed: ${err instanceof Error ? err.message : err}`);
+      });
+
+      return;
+    }
+
+    if (trnm === 'LOGIN' || trnm === 'REG' || trnm === 'REMOVE') return;
 
     this.frameHandler?.(parsed);
   }
@@ -790,12 +878,29 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   }
 
   private async performLogin(): Promise<void> {
-    const tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
-    const ack = this.installLoginAckGate();
+    let tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
 
-    await this.opts.wsClient.send({ trnm: 'LOGIN', token: tokenResult.token });
+    try {
+      await this.sendLoginAndWait(tokenResult.token);
+    } catch (err) {
+      const retryTokenResult = await this.refreshWsLoginToken(tokenResult, err);
 
-    await ack;
+      if (!retryTokenResult) {
+        await this.recordWsLoginFailure(err, tokenResult.credential);
+
+        throw err;
+      }
+
+      tokenResult = retryTokenResult;
+
+      try {
+        await this.sendLoginAndWait(tokenResult.token);
+      } catch (retryErr) {
+        await this.recordWsLoginFailure(retryErr, tokenResult.credential);
+
+        throw retryErr;
+      }
+    }
 
     if (
       this.activeWsCredential &&
@@ -807,16 +912,45 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     this.activeWsCredential = tokenResult.credential;
     if (tokenResult.credential) {
+      if (this.opts.profile === 'collector' && tokenResult.credential.kind === 'collector') {
+        await this.opts.collectorRuntimeState?.markSuccess({
+          credentialId: tokenResult.credential.credentialId,
+          source: 'WS',
+        });
+      }
       this.opts.usage?.markWsConnected(
         this.opts.profile,
         tokenResult.credential,
         this.subscriptions.size,
+        Array.from(this.subscriptions.keys()),
       );
     }
 
     const delay = this.opts.postLoginDelayMs ?? DEFAULT_POST_LOGIN_DELAY_MS;
 
     if (delay > 0) await sleep(delay);
+  }
+
+  private async sendLoginAndWait(token: string): Promise<void> {
+    const ack = this.installLoginAckGate();
+
+    await this.opts.wsClient.send({ trnm: 'LOGIN', token });
+
+    await ack;
+  }
+
+  private async refreshWsLoginToken(
+    tokenResult: ReturnType<typeof normalizeTokenResult>,
+    err: unknown,
+  ): Promise<ReturnType<typeof normalizeTokenResult> | null> {
+    if (!tokenResult.invalidate || !isTokenRejected(err)) return null;
+
+    tokenResult.invalidate();
+
+    const next = normalizeTokenResult(await this.opts.tokenSupplier());
+    if (!next.token || next.token === tokenResult.token) return null;
+
+    return next;
   }
 
   private async scheduleReconnect(): Promise<void> {
@@ -931,7 +1065,43 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       this.opts.profile,
       this.activeWsCredential,
       this.subscriptions.size,
+      Array.from(this.subscriptions.keys()),
     );
+  }
+
+  private async recordWsLoginFailure(
+    err: unknown,
+    credential = this.activeWsCredential,
+  ): Promise<void> {
+    if (isCredentialAuthFailure(err)) {
+      await this.recordWsAuthFailed(err, credential);
+
+      return;
+    }
+
+    await this.recordWsLimited(err, credential);
+  }
+
+  private async recordWsLimited(err: unknown, credential = this.activeWsCredential): Promise<void> {
+    if (this.opts.profile !== 'collector' || !credential) return;
+
+    await this.opts.collectorRuntimeState?.markWsLimited({
+      credentialId: credential.credentialId,
+      reason: `WS limited suspected: ${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+
+  private async recordWsAuthFailed(
+    err: unknown,
+    credential = this.activeWsCredential,
+  ): Promise<void> {
+    if (this.opts.profile !== 'collector' || !credential) return;
+
+    await this.opts.collectorRuntimeState?.markAuthFailed({
+      credentialId: credential.credentialId,
+      source: 'WS',
+      reason: `WS auth failed: ${err instanceof Error ? err.message : String(err)}`,
+    });
   }
 
   private assertProfile(expected: BrokerageVendorProfile, method: string): void {
@@ -962,6 +1132,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 const KIND_TO_REALTIME_TYPE: Record<MarketDataFrameKind, string> = {
   'trade-tick': '0B',
   orderbook: '0D',
+  'market-index': '0J',
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -976,6 +1147,42 @@ function isLoginFailure(err: unknown): boolean {
   return message.startsWith('Kiwoom LOGIN failed') || message === 'Kiwoom LOGIN ack timeout';
 }
 
+function isCredentialAuthFailure(err: unknown): boolean {
+  if (!(err instanceof IntegrationError)) return false;
+
+  const details = err.details ?? {};
+  const returnMsg = typeof details.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const returnCode = String(details.returnCode ?? '').toLowerCase();
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    haystack.includes('auth') ||
+    haystack.includes('token') ||
+    haystack.includes('invalid') ||
+    haystack.includes('unauthorized') ||
+    haystack.includes('인증') ||
+    haystack.includes('토큰')
+  );
+}
+
+function isTokenRejected(err: unknown): boolean {
+  if (!(err instanceof IntegrationError)) return false;
+
+  const details = err.details ?? {};
+  const returnMsg = typeof details.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
+  const returnCode = String(details.returnCode ?? '').toLowerCase();
+  const message = err.message.toLowerCase();
+  const haystack = `${returnCode} ${returnMsg} ${message}`;
+
+  return (
+    haystack.includes('token') ||
+    haystack.includes('토큰') ||
+    haystack.includes('expired') ||
+    haystack.includes('만료')
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -988,12 +1195,85 @@ function parseNumberOr0(input: string | number | undefined | null): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-function parseNumberOrNull(input: string | number | undefined | null): number | null {
-  if (input === null || input === undefined || input === '') return null;
+function parseKiwoomPriceOrNull(value: unknown): number | null {
+  // Kiwoom REST chart fields encode previous-day direction in the sign
+  // bit (`-274000` means price 274000, down vs previous day). KRX stock
+  // instruments trade at positive prices, so abs is the correct candle
+  // magnitude. Revisit this if expanding to products that can have
+  // negative prices.
+  const n = parseSignedNumber(value);
 
-  const n = typeof input === 'number' ? input : parseFloat(input);
+  return n === null ? null : Math.abs(n);
+}
 
-  return Number.isFinite(n) ? n : null;
+function parseKiwoomAbsoluteNumberOrNull(value: unknown): number | null {
+  // Volumes are magnitudes for candle storage even when a vendor sends a
+  // signed representation.
+  const n = parseSignedNumber(value);
+
+  return n === null ? null : Math.abs(n);
+}
+
+function normalizeIndexResponse(
+  response: KiwoomMarketIndexCurrentResponseContract,
+  symbol: MarketIndexSymbol,
+): Record<string, unknown> {
+  const candidates = [
+    response,
+    firstObject(response.industry_current_price),
+    firstObject(response.inds_cur_prc),
+    firstObject(response.ind_cur_prc),
+    firstObject(response.output),
+    firstObject(response.list),
+  ];
+  const code = MARKET_INDEX_CODES[symbol];
+
+  return (
+    candidates.find(
+      (row) =>
+        row &&
+        (pickString(row, ['inds_cd', 'ind_cd', 'mrkt_tp']) === code ||
+          pickString(row, ['inds_nm', 'ind_nm', 'stk_nm']) === MARKET_INDEX_NAMES[symbol]),
+    ) ??
+    candidates.find(Boolean) ??
+    response
+  );
+}
+
+function firstObject(value: unknown): Record<string, unknown> | null {
+  if (Array.isArray(value)) {
+    const first = value.find((item) => typeof item === 'object' && item !== null);
+
+    return first ? (first as Record<string, unknown>) : null;
+  }
+
+  if (typeof value === 'object' && value !== null) return value as Record<string, unknown>;
+
+  return null;
+}
+
+function pickValue(row: Record<string, unknown>, keys: readonly string[]): unknown {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null && row[key] !== '') return row[key];
+  }
+
+  return null;
+}
+
+function pickString(row: Record<string, unknown>, keys: readonly string[]): string | null {
+  const value = pickValue(row, keys);
+
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
+}
+
+function parseSignedNumberStrict(value: unknown): number | null {
+  return parseSignedNumber(value);
+}
+
+function parseSignedNumberAbs(value: unknown): number | null {
+  const n = parseSignedNumber(value);
+
+  return n === null ? null : Math.abs(n);
 }
 
 function toYyyyMmDd(iso: string): string {
@@ -1015,13 +1295,14 @@ function toYyyyMmDd(iso: string): string {
 function parseKiwoomCandleTs(
   row: KiwoomChartCandleRowContract,
   isMinute: boolean,
+  baseDt: string,
 ): number | null {
   if (isMinute) {
     const raw = row.cntr_tm ?? row.dt;
 
     if (!raw) return null;
 
-    // Accept YYYYMMDDHHmmss as the safe format.
+    // Kiwoom chart timestamps are KST exchange times. Persist buckets in UTC.
     if (raw.length === 14) {
       const y = Number(raw.slice(0, 4));
       const mo = Number(raw.slice(4, 6)) - 1;
@@ -1032,7 +1313,20 @@ function parseKiwoomCandleTs(
 
       if ([y, mo, d, h, mi, s].some((v) => Number.isNaN(v))) return null;
 
-      return Date.UTC(y, mo, d, h, mi, s);
+      return Date.UTC(y, mo, d, h, mi, s) - KST_OFFSET_MS;
+    }
+
+    if (raw.length === 6 && baseDt.length === 8) {
+      const y = Number(baseDt.slice(0, 4));
+      const mo = Number(baseDt.slice(4, 6)) - 1;
+      const d = Number(baseDt.slice(6, 8));
+      const h = Number(raw.slice(0, 2));
+      const mi = Number(raw.slice(2, 4));
+      const s = Number(raw.slice(4, 6));
+
+      if ([y, mo, d, h, mi, s].some((v) => Number.isNaN(v))) return null;
+
+      return Date.UTC(y, mo, d, h, mi, s) - KST_OFFSET_MS;
     }
 
     return null;
@@ -1048,14 +1342,11 @@ function parseKiwoomCandleTs(
 
   if ([y, mo, d].some((v) => Number.isNaN(v))) return null;
 
-  return Date.UTC(y, mo, d);
+  return Date.UTC(y, mo, d) - KST_OFFSET_MS;
 }
 
 function mapOrderResponseToAck(
-  response:
-    | PlaceOrderResponseContract
-    | CancelOrderResponseContract
-    | ModifyOrderResponseContract,
+  response: PlaceOrderResponseContract | CancelOrderResponseContract | ModifyOrderResponseContract,
   status: OrderAckModel['status'],
 ): OrderAckModel {
   const side: OrderSide = response.ordSide === '2' ? 'buy' : 'sell';

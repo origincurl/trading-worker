@@ -21,6 +21,7 @@ export interface KiwoomChartCandleRowContract {
   readonly cur_prc?: string;
   // Volume. tradeVolume / trd_qty / cntr_qty depending on apiId.
   readonly tradeVolume?: string;
+  readonly trde_qty?: string;
   readonly trd_qty?: string;
   readonly cntr_qty?: string;
 }

@@ -4,6 +4,7 @@ import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
 import { KiwoomTickSubscriber } from '@roles/collector/trigger/subscriber/kiwoom-tick.subscriber';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
+import type { SubscriptionStateSnapshot } from '@roles/collector/usecase/refresh-universe.usecase';
 import { CandleBuilderService } from './candle-builder.service';
 import { CandleCloseService } from './candle-close.service';
 import { MarketOrderbookService } from './market-orderbook.service';
@@ -33,22 +34,27 @@ export class CollectorStatusService implements RoleStatusProvider {
   getMetrics(): HeartbeatMetrics {
     return {
       universe_size: this.universe.size(),
-      observed_admin_count: this.universe.observedAdminCount(),
       observed_fe_count: this.universe.observedFeCount(),
-      active_subscriptions: this.subscriber.subscribedSymbols().length,
+      strategy_desired_count: this.universe.strategyDemandCount(),
+      active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
+      ws_connected: this.subscriber.isConnected(),
     };
   }
 
+  getSubscriptionState(): SubscriptionStateSnapshot {
+    return this.refreshUniverse.subscriptionState();
+  }
+
   getStatus(): RoleStatus {
-    const subscribed = this.subscriber.subscribedSymbols().length;
+    const subscribed = this.refreshUniverse.actualSubscriptionCount();
     const last = this.tickService.lastTickAt();
     const lastOb = this.orderbookService.lastSnapshotAt();
     const lastClose = this.candleClose.lastClosedAt();
     const stats = this.ingestUsecase.snapshotStats();
     const openBuckets = this.candleBuilder.openBuckets().length;
     const universeSize = this.universe.size();
-    const adminCount = this.universe.observedAdminCount();
     const feCount = this.universe.observedFeCount();
+    const strategyCount = this.universe.strategyDemandCount();
     const lastRefresh = this.refreshUniverse.lastRefreshAt();
 
     const rejections = Array.from(this.candleBuilder.rejectionCounts())
@@ -57,12 +63,13 @@ export class CollectorStatusService implements RoleStatusProvider {
 
     const detail =
       `subscribed=${subscribed} ticks=${stats.ticks} orderbooks=${stats.orderbooks} ` +
+      `marketIndexes=${stats.marketIndexes} ` +
       `openBuckets=${openBuckets} closedCandles=${this.candleClose.closedCount()} ` +
       `deadLetters=${stats.deadLetters} parseWarnings=${stats.parseWarnings} ` +
       `rejections=[${rejections}] ` +
       `lastTickAt=${last?.toISOString() ?? 'never'} lastObAt=${lastOb?.toISOString() ?? 'never'} ` +
       `lastCloseAt=${lastClose?.toISOString() ?? 'never'} ` +
-      `universeSize=${universeSize} observedAdmin=${adminCount} observedFe=${feCount} ` +
+      `universeSize=${universeSize} observedFe=${feCount} strategyDesired=${strategyCount} ` +
       `universeRefreshOk=${this.refreshUniverse.lastRefreshOk()} ` +
       `lastUniverseRefreshAt=${lastRefresh?.toISOString() ?? 'never'} ` +
       `wsConnected=${this.subscriber.isConnected()} uptime=${Math.floor((Date.now() - this.bootedAt) / 1000)}s`;

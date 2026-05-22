@@ -1,4 +1,5 @@
 import type { CandleInterval } from '@shared/event/market-candle-closed.event';
+import type { CandleChartMarket } from '@shared/event/market-candle-closed.event';
 import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
 
 // Kiwoom chart REST response → MarketCandleClosedPayload[].
@@ -22,6 +23,7 @@ export interface ChartCandleMapperContext {
   readonly marketEnv: 'mock' | 'production';
   readonly symbol: string;
   readonly intervalType: CandleInterval;
+  readonly chartMarket?: CandleChartMarket;
 }
 
 export function rowToCandlePayload(
@@ -33,6 +35,8 @@ export function rowToCandlePayload(
     marketEnv: ctx.marketEnv,
     symbol: ctx.symbol,
     market: null,
+    chartSource: 'broker_chart_REST',
+    chartMarket: ctx.chartMarket ?? 'KRW',
     intervalType: ctx.intervalType,
     bucketStart: row.bucketStart,
     bucketEnd: row.bucketEnd,

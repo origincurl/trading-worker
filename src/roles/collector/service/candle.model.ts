@@ -1,4 +1,8 @@
 import type { MarketTickMarket } from '@shared/event/market-tick.event';
+import type {
+  CandleChartMarket,
+  CandleChartSource,
+} from '@shared/event/market-candle-closed.event';
 
 // In-memory 1m candle aggregate. Phase 6.6 uses Date for internal math;
 // model→event conversion stringifies on the boundary.
@@ -11,6 +15,8 @@ export interface CandleModel {
   symbol: string;
   marketEnv: 'mock' | 'production';
   market: MarketTickMarket;
+  chartSource: CandleChartSource;
+  chartMarket: CandleChartMarket;
   bucketStart: Date;
   bucketEnd: Date;
   open: number;

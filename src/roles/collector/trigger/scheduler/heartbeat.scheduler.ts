@@ -1,4 +1,10 @@
-import { Inject, Injectable, Logger, type OnModuleDestroy, type OnModuleInit } from '@nestjs/common';
+import {
+  Inject,
+  Injectable,
+  Logger,
+  type OnModuleDestroy,
+  type OnModuleInit,
+} from '@nestjs/common';
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 import { HeartbeatUsecase } from '@roles/collector/usecase/heartbeat.usecase';
 
@@ -19,7 +25,11 @@ export class HeartbeatScheduler implements OnModuleInit, OnModuleDestroy {
     const intervalMs = this.redis.heartbeatIntervalSec * 1000;
 
     this.timer = setInterval(() => void this.tick(), intervalMs);
+
     this.timer.unref();
+
+    void this.tick();
+
     this.logger.log(`scheduler collector.heartbeat every ${this.redis.heartbeatIntervalSec}s`);
   }
 

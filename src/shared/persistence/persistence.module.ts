@@ -34,6 +34,12 @@ import { ChannelEntity } from './channel/channel.entity';
 import { CHANNEL_REPOSITORY } from './channel/channel.token';
 import { ChannelRepositoryImpl } from './channel/channel.repository.impl';
 import { CollectorCredentialEntity } from './collector-credential/collector-credential.entity';
+import {
+  CollectorCredentialLimitPolicyEntity,
+  CollectorCredentialRuntimeStateEntity,
+} from './collector-credential/collector-credential-limit.entity';
+import { COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY } from './collector-credential/collector-credential-limit.token';
+import { CollectorCredentialLimitRepositoryImpl } from './collector-credential/collector-credential-limit.repository.impl';
 import { COLLECTOR_CREDENTIAL_REPOSITORY } from './collector-credential/collector-credential.token';
 import { CollectorCredentialRepositoryImpl } from './collector-credential/collector-credential.repository.impl';
 import { DecisionEntity } from './decision/decision.entity';
@@ -98,6 +104,8 @@ const SHARED_ENTITIES = [
   MarketEntity,
   ExchangeEntity,
   CollectorCredentialEntity,
+  CollectorCredentialLimitPolicyEntity,
+  CollectorCredentialRuntimeStateEntity,
   AccountEntity,
   AccountCredentialEntity,
   ApiCredentialEntity,
@@ -127,6 +135,10 @@ const SHARED_REPOSITORY_PROVIDERS = [
   { provide: MARKET_REPOSITORY, useClass: MarketRepositoryImpl },
   { provide: EXCHANGE_REPOSITORY, useClass: ExchangeRepositoryImpl },
   { provide: COLLECTOR_CREDENTIAL_REPOSITORY, useClass: CollectorCredentialRepositoryImpl },
+  {
+    provide: COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY,
+    useClass: CollectorCredentialLimitRepositoryImpl,
+  },
   { provide: ACCOUNT_REPOSITORY, useClass: AccountRepositoryImpl },
   { provide: ACCOUNT_CREDENTIAL_REPOSITORY, useClass: AccountCredentialRepositoryImpl },
   { provide: API_CREDENTIAL_REPOSITORY, useClass: ApiCredentialRepositoryImpl },
@@ -187,10 +199,7 @@ export class PersistenceModule {
 
     return {
       module: PersistenceModule,
-      imports: [
-        TypeOrmModule.forRoot(typeormOptions),
-        TypeOrmModule.forFeature(SHARED_ENTITIES),
-      ],
+      imports: [TypeOrmModule.forRoot(typeormOptions), TypeOrmModule.forFeature(SHARED_ENTITIES)],
       providers: SHARED_REPOSITORY_PROVIDERS,
       exports: [TypeOrmModule, ...SHARED_REPOSITORY_TOKENS],
     };

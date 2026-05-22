@@ -1,6 +1,10 @@
 import type { AccountBalanceModel, PositionModel } from '../model/account.model';
 import type { OrderAckModel, OrderSide, OrderType } from '../model/order.model';
-import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import type {
+  CandleChartMarket,
+  MarketCandleClosedPayload,
+} from '@shared/event/market-candle-closed.event';
+import type { MarketIndexPayload, MarketIndexSymbol } from '@shared/event/market-index.event';
 
 export interface GetAccountBalanceInput {
   readonly accountId: string;
@@ -35,7 +39,7 @@ export interface ModifyOrderInput {
 // Phase 6: real-time market data subscription. Collector-only — the
 // executor profile gateway throws on these methods (rate budgets must stay
 // separate; collector ws bandwidth cannot bleed into order ack latency).
-export type MarketDataFrameKind = 'trade-tick' | 'orderbook';
+export type MarketDataFrameKind = 'trade-tick' | 'orderbook' | 'market-index';
 
 export interface SubscribeMarketDataInput {
   readonly symbols: readonly string[];
@@ -60,6 +64,7 @@ export interface MarketDataSubscription {
 export interface FetchChartCandlesInput {
   readonly symbol: string;
   readonly marketEnv: 'mock' | 'production';
+  readonly chartMarket?: CandleChartMarket;
   readonly intervalType: '1m' | '1d';
   readonly fromIso: string;
   readonly toIso: string;
@@ -80,6 +85,13 @@ export interface GetStockMasterListInput {
   readonly marketEnv: 'mock' | 'production';
 }
 
+export interface FetchMarketIndexSnapshotsInput {
+  readonly marketEnv: 'mock' | 'production';
+  readonly symbols: readonly MarketIndexSymbol[];
+}
+
+export type MarketIndexSnapshot = MarketIndexPayload;
+
 export interface BrokerageVendor {
   // collector-facing read paths
   getAccountBalance(input: GetAccountBalanceInput): Promise<AccountBalanceModel>;
@@ -94,6 +106,11 @@ export interface BrokerageVendor {
   fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]>;
   // Phase E: stock master list. Collector-only — feeds the stock_list sync.
   getStockMasterList(input: GetStockMasterListInput): Promise<StockMasterEntry[]>;
+  // Header market index snapshots. Collector-only — feeds BE's Redis-only
+  // `/v1/market-data/indices` reader.
+  fetchMarketIndexSnapshots(
+    input: FetchMarketIndexSnapshotsInput,
+  ): Promise<MarketIndexSnapshot[]>;
 
   // executor-facing write paths
   placeOrder(input: PlaceOrderInput): Promise<OrderAckModel>;

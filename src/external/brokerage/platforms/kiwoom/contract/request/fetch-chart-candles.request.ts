@@ -5,9 +5,9 @@
 // Two variants share the same shape; only the optional fields differ
 // between minute (ka10080) and daily (ka10081) endpoints.
 export interface FetchChartCandlesRequestContract {
-  readonly stkCd: string;
+  readonly stk_cd: string;
   // YYYYMMDD anchor — Kiwoom returns candles working backward from this date.
-  readonly baseDt: string;
+  readonly base_dt: string;
   // Minute interval bucket. '1', '3', '5', '10', '15', '30', '45', '60'.
   // TODO(kiwoom-spec): confirm field name is `tic_scope` for ka10080;
   // some Kiwoom docs show `tic_scope` in snake_case while others use

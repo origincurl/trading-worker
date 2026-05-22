@@ -6,13 +6,16 @@ import {
   type DispatchResult,
 } from '@roles/collector/mapper/kiwoom-tick.event-mapper';
 import { DeadLetterService } from '@roles/collector/service/dead-letter.service';
+import { MarketIndexSnapshotService } from '@roles/collector/service/market-index-snapshot.service';
 import { MarketOrderbookService } from '@roles/collector/service/market-orderbook.service';
 import { MarketTickService } from '@roles/collector/service/market-tick.service';
+import { RefreshUniverseUsecase } from './refresh-universe.usecase';
 
 interface IngestStats {
   total: number;
   ticks: number;
   orderbooks: number;
+  marketIndexes: number;
   ignored: number;
   deadLetters: number;
   parseWarnings: number;
@@ -24,6 +27,7 @@ export class IngestTickUsecase {
     total: 0,
     ticks: 0,
     orderbooks: 0,
+    marketIndexes: 0,
     ignored: 0,
     deadLetters: 0,
     parseWarnings: 0,
@@ -33,7 +37,9 @@ export class IngestTickUsecase {
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
     private readonly tickService: MarketTickService,
     private readonly orderbookService: MarketOrderbookService,
+    private readonly marketIndexService: MarketIndexSnapshotService,
     private readonly deadLetter: DeadLetterService,
+    private readonly refreshUniverse: RefreshUniverseUsecase,
   ) {}
 
   snapshotStats(): Readonly<IngestStats> {
@@ -55,6 +61,7 @@ export class IngestTickUsecase {
     switch (result.kind) {
       case 'tick':
         this.stats.ticks += 1;
+        this.refreshUniverse.recordFrameReceived(result.tick.symbol, new Date(result.tick.receivedAt));
 
         if (result.tick.parseWarnings.length > 0) {
           this.stats.parseWarnings += 1;
@@ -73,8 +80,19 @@ export class IngestTickUsecase {
 
       case 'orderbook':
         this.stats.orderbooks += 1;
+        this.refreshUniverse.recordFrameReceived(
+          result.orderbook.symbol,
+          new Date(result.orderbook.receivedAt),
+        );
 
         await this.orderbookService.recordSnapshot(result.orderbook);
+
+        return;
+
+      case 'market-index':
+        this.stats.marketIndexes += 1;
+
+        await this.marketIndexService.recordRealtime(result.marketIndex);
 
         return;
 

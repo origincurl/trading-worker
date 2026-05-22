@@ -77,6 +77,20 @@ describe('CandleBuilderService', () => {
     expect(r2.current.open).toBe(120);
   });
 
+  it('tags 0B-built candles with KRW chart provenance', () => {
+    const r = builder.ingest(
+      tick({ sourceTs: '2026-05-12T05:01:10Z', price: 100, tradeVolume: 1 }),
+    );
+
+    expect(r.kind).toBe('accepted');
+
+    if (r.kind !== 'accepted') return;
+
+    expect(r.current.chartSource).toBe('trade_tick_0B');
+
+    expect(r.current.chartMarket).toBe('KRW');
+  });
+
   it('rejects price <= 0', () => {
     const r = builder.ingest(tick({ sourceTs: '2026-05-12T05:01:10Z', price: 0, tradeVolume: 1 }));
 

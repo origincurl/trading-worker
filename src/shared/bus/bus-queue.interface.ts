@@ -2,6 +2,10 @@ export interface EnqueueOptions {
   readonly jobId?: string;
   readonly delayMs?: number;
   readonly attempts?: number;
+  readonly backoff?: {
+    readonly type: 'fixed' | 'exponential';
+    readonly delayMs: number;
+  };
 }
 
 export interface BusQueueJob<T = unknown> {

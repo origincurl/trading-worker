@@ -3,6 +3,7 @@ import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
 
 const SAFE_SEGMENT = /^[A-Za-z0-9._:-]+$/;
+const SAFE_PATTERN_SEGMENT = /^[A-Za-z0-9._:*-]+$/;
 
 export function assertSafeKeySegment(segment: string): void {
   if (typeof segment !== 'string' || segment.length === 0) {
@@ -12,6 +13,18 @@ export function assertSafeKeySegment(segment: string): void {
   if (!SAFE_SEGMENT.test(segment)) {
     throw new Error(
       `Redis key segment contains forbidden characters: ${JSON.stringify(segment)} (allowed: [A-Za-z0-9._:-])`,
+    );
+  }
+}
+
+function assertSafePatternSegment(segment: string): void {
+  if (typeof segment !== 'string' || segment.length === 0) {
+    throw new Error('Redis key pattern segment must be a non-empty string');
+  }
+
+  if (!SAFE_PATTERN_SEGMENT.test(segment)) {
+    throw new Error(
+      `Redis key pattern segment contains forbidden characters: ${JSON.stringify(segment)} (allowed: [A-Za-z0-9._:*-])`,
     );
   }
 }
@@ -33,6 +46,20 @@ export class RedisKeyBuilder {
 
     for (const seg of segments) {
       assertSafeKeySegment(seg);
+    }
+
+    return [this.redis.keyPrefix, this.kiwoom.marketEnv, domain, ...segments].join(':');
+  }
+
+  pattern(domain: string, ...segments: string[]): string {
+    assertSafeKeySegment(this.redis.keyPrefix);
+
+    assertSafeKeySegment(this.kiwoom.marketEnv);
+
+    assertSafeKeySegment(domain);
+
+    for (const seg of segments) {
+      assertSafePatternSegment(seg);
     }
 
     return [this.redis.keyPrefix, this.kiwoom.marketEnv, domain, ...segments].join(':');

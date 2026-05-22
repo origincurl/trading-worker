@@ -7,6 +7,7 @@ import type {
 } from '@external/brokerage/vendor/brokerage.vendor';
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
+import { CollectorShardAssignmentService } from '@roles/collector/service/collector-shard-assignment.service';
 import { UniverseService } from '@roles/collector/service/universe.service';
 import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
 
@@ -28,6 +29,9 @@ export interface SubscriptionDriftSnapshot {
 }
 
 export interface SubscriptionStateSnapshot {
+  // Current worker-owned assignment set. Before multi-collector sharding this equals desiredSymbols.
+  readonly assignedCount: number;
+  readonly assignedSample: readonly string[];
   readonly desiredCount: number;
   readonly actualRequestedCount: number;
   readonly actualEffectiveCount: number;
@@ -42,6 +46,10 @@ export interface SubscriptionStateSnapshot {
   readonly effectiveWindowMs: number;
   readonly effectiveState: 'warming_up' | 'ready';
   readonly effectiveWarmupUntil: string;
+  readonly activeCollectorCount: number;
+  readonly activeCollectors: readonly string[];
+  readonly shardLeaseStatus: 'not_configured' | 'configured';
+  readonly takeoverEvents: readonly string[];
 }
 
 const EFFECTIVE_WINDOW_MS = 30_000;
@@ -71,6 +79,14 @@ export class RefreshUniverseUsecase {
 
   private actualSymbols: readonly string[] = [];
 
+  private assignedSymbols: readonly string[] = [];
+
+  private activeCollectors: readonly string[] = [];
+
+  private shardLeaseStatus: 'not_configured' | 'configured' = 'not_configured';
+
+  private takeoverEvents: readonly string[] = [];
+
   private readonly lastFrameAtBySymbol = new Map<string, number>();
 
   constructor(
@@ -78,6 +94,7 @@ export class RefreshUniverseUsecase {
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
     private readonly universe: UniverseService,
+    private readonly assignment: CollectorShardAssignmentService,
     private readonly planner: SubscriptionPlannerService,
   ) {}
 
@@ -109,6 +126,7 @@ export class RefreshUniverseUsecase {
     this.pruneLastFrameEntries();
 
     const desired = normalizeSymbols(this.desiredSymbols);
+    const assigned = normalizeSymbols(this.assignedSymbols);
     const actualRequested = normalizeSymbols(this.actualSymbols);
     const actualEffective = this.effectiveSymbols();
     const desiredNotRequested = difference(desired, actualRequested);
@@ -117,6 +135,8 @@ export class RefreshUniverseUsecase {
     const effectiveNotRequested = difference(actualEffective, actualRequested);
 
     return {
+      assignedCount: assigned.length,
+      assignedSample: sample(assigned),
       desiredCount: desired.length,
       actualRequestedCount: actualRequested.length,
       actualEffectiveCount: actualEffective.length,
@@ -138,6 +158,10 @@ export class RefreshUniverseUsecase {
       effectiveWindowMs: EFFECTIVE_WINDOW_MS,
       effectiveState: this.effectiveState(),
       effectiveWarmupUntil: new Date(this.bootedAtMs + EFFECTIVE_WINDOW_MS).toISOString(),
+      activeCollectorCount: this.activeCollectors.length,
+      activeCollectors: [...this.activeCollectors],
+      shardLeaseStatus: this.shardLeaseStatus,
+      takeoverEvents: [...this.takeoverEvents],
     };
   }
 
@@ -158,12 +182,25 @@ export class RefreshUniverseUsecase {
       return;
     }
 
-    this.universe.apply([], [], feSymbols);
+    const desiredUniverse = this.universe.apply([], [], feSymbols);
 
     this._lastRefreshOk = true;
 
-    const target = this.universe.symbolList();
+    const globalTarget = desiredUniverse.map((symbol) => symbol.symbol);
+    const assignment = await this.assignment.assign(globalTarget);
+    const target = [...assignment.assignedSymbols];
+
+    this.universe.applyAssigned(target);
+
     this.desiredSymbols = [...target];
+
+    this.assignedSymbols = [...target];
+
+    this.activeCollectors = [...assignment.activeCollectors];
+
+    this.shardLeaseStatus = assignment.leaseStatus;
+
+    this.takeoverEvents = [...assignment.takeoverEvents];
 
     if (!this.gateway.isMarketDataStreamConnected()) {
       this.logger.warn('gateway not connected — universe REG deferred');
@@ -186,6 +223,7 @@ export class RefreshUniverseUsecase {
     }
 
     this.actualSymbols = [...target];
+
     this._lastReconcileAt = new Date();
 
     if (plan.add.length > 0 || plan.remove.length > 0) {

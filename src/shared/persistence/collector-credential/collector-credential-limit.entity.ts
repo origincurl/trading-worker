@@ -76,24 +76,30 @@ export class CollectorCredentialRuntimeStateEntity {
     enumName: 'collector_credential_runtime_status',
     default: CollectorCredentialRuntimeStatus.Active,
   })
+  /** @deprecated Use restStatus / wsStatus. Kept only for transition compatibility. */
   status!: CollectorCredentialRuntimeStatus;
 
   @Column({ name: 'cooldown_until', type: 'timestamp', nullable: true })
+  /** @deprecated Use restCooldownUntil / wsCooldownUntil. Kept only for transition compatibility. */
   cooldownUntil!: Date | null;
 
   @Column({ name: 'last_rate_limited_at', type: 'timestamp', nullable: true })
+  /** @deprecated Use restLastRateLimitedAt. Kept only for transition compatibility. */
   lastRateLimitedAt!: Date | null;
 
   @Column({ name: 'last_retry_after_ms', type: 'int', nullable: true })
   lastRetryAfterMs!: number | null;
 
   @Column({ name: 'last_auth_failed_at', type: 'timestamp', nullable: true })
+  /** @deprecated Use restLastAuthFailedAt / wsLastAuthFailedAt. Kept only for transition compatibility. */
   lastAuthFailedAt!: Date | null;
 
   @Column({ name: 'last_ws_limited_at', type: 'timestamp', nullable: true })
+  /** @deprecated Use wsLastLimitedAt. Kept only for transition compatibility. */
   lastWsLimitedAt!: Date | null;
 
   @Column({ name: 'last_error_message', type: 'text', nullable: true })
+  /** @deprecated Use restLastErrorMessage / wsLastErrorMessage. Kept only for transition compatibility. */
   lastErrorMessage!: string | null;
 
   @Column({

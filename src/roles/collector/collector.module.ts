@@ -14,6 +14,7 @@ import { CandleBuilderService } from './service/candle-builder.service';
 import { CandleCloseService } from './service/candle-close.service';
 import { ChartCatchupService } from './service/chart-catchup.service';
 import { ChartEmptyRangeService } from './service/chart-empty-range.service';
+import { CollectorShardAssignmentService } from './service/collector-shard-assignment.service';
 import { CollectorStatusService } from './service/collector-status.service';
 import { DeadLetterService } from './service/dead-letter.service';
 import { FxSnapshotService } from './service/fx-snapshot.service';
@@ -47,6 +48,7 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     CandleCloseService,
     ChartCatchupService,
     ChartEmptyRangeService,
+    CollectorShardAssignmentService,
     DeadLetterService,
     MarketIndexSnapshotService,
     FxSnapshotService,

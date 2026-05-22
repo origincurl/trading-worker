@@ -1,6 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
-import { shouldHandle } from '@common/util/shard';
-import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
+import { Injectable, Logger } from '@nestjs/common';
 import type {
   ObservedSymbolModel,
   ObservedSymbolSource,
@@ -10,12 +8,15 @@ import type {
 // demand-driven path later. Admin watchlists are intentionally not direct
 // broker WS sources.
 // UniverseService normalizes (dedup by symbol — same symbol can appear in
-// both stock and ETF lists with different source flags), applies the
-// shard hash filter, and exposes per-source counts for heartbeat metrics.
+// both stock and ETF lists with different source flags) and exposes
+// per-source counts for heartbeat metrics. Dynamic collector ownership is
+// applied by CollectorShardAssignmentService.
 // Each refresh is the authoritative snapshot — no version/leaseId.
 @Injectable()
 export class UniverseService {
   private readonly logger = new Logger(UniverseService.name);
+
+  private desiredSymbols: ObservedSymbolModel[] = [];
 
   private currentSymbols: ObservedSymbolModel[] = [];
 
@@ -27,9 +28,7 @@ export class UniverseService {
 
   private lastAppliedAt: Date | null = null;
 
-  constructor(@Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig) {}
-
-  // Returns the shard-filtered, normalized observation universe.
+  // Returns the worker-assigned, normalized observation universe.
   symbols(): readonly ObservedSymbolModel[] {
     return this.currentSymbols;
   }
@@ -57,35 +56,39 @@ export class UniverseService {
 
   // Replaces the in-memory universe with the union of active demand sources.
   // Admin args are kept for compatibility with the source-counter model but
-  // normal refresh passes them empty. Returns symbols in this worker's shard.
+  // normal refresh passes them empty. Returns all normalized symbols before
+  // collector ownership assignment.
   apply(
     adminStocks: readonly ObservedSymbolModel[],
     adminEtfs: readonly ObservedSymbolModel[],
     feSymbols: readonly ObservedSymbolModel[],
-  ): number {
+  ): ObservedSymbolModel[] {
     const merged = this.normalize([...adminStocks, ...adminEtfs, ...feSymbols]);
 
-    const sharded = merged.filter((s) =>
-      shouldHandle(s.symbol, this.runtime.shardIndex, this.runtime.shardCount),
-    );
-
-    this.currentSymbols = sharded;
-    this.lastAppliedAt = new Date();
     this.adminCount = this.countSource(merged, 'ADMIN');
+
     this.feCount = this.countSource(merged, 'FE');
+
     this.bothCount = this.countSource(merged, 'BOTH');
 
-    this.logger.log(
-      `universe applied: total=${merged.length} sharded=${sharded.length} admin=${this.adminCount} fe=${this.feCount} both=${this.bothCount}`,
-    );
+    this.desiredSymbols = merged;
 
-    return sharded.length;
+    return merged;
   }
 
-  private countSource(
-    list: readonly ObservedSymbolModel[],
-    source: ObservedSymbolSource,
-  ): number {
+  applyAssigned(symbols: readonly string[]): number {
+    const assigned = new Set(symbols);
+
+    this.currentSymbols = this.currentSymbolsFromAssigned(assigned);
+
+    this.lastAppliedAt = new Date();
+
+    this.logger.log(`universe assigned: assigned=${this.currentSymbols.length}`);
+
+    return this.currentSymbols.length;
+  }
+
+  private countSource(list: readonly ObservedSymbolModel[], source: ObservedSymbolSource): number {
     return list.reduce((acc, s) => (s.source === source ? acc + 1 : acc), 0);
   }
 
@@ -117,5 +120,9 @@ export class UniverseService {
     }
 
     return Array.from(byKey.values()).sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }
+
+  private currentSymbolsFromAssigned(assigned: ReadonlySet<string>): ObservedSymbolModel[] {
+    return this.desiredSymbols.filter((symbol) => assigned.has(symbol.symbol));
   }
 }

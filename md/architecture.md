@@ -7,10 +7,12 @@
 ## 1. 범위와 책임
 
 ### 워커가 하는 일
-- **collector**: 3rd-party API/WS에서 시장·계좌·정보 수집 → 정규화 → 영속화 + 라이브 채널 publish
+- **collector**: 3rd-party API/WS에서 시장 데이터/종목 정보 수집 → 정규화 → 영속화 + 라이브 채널 publish
 - **calculator**: 영속화된 데이터 기반 지표 연산 → 영속화
-- **executor**: 전략 + 정보 + 지표 조합 → 결정 생성 → 주문/취소/수정 → 체결 후속 동작
-- **detector**: 리스크 + 정보 + 지표 조합 → 경보 생성 → 알림 채널 호출
+- **executor**: 승인된 주문/취소/수정 요청을 계좌 credential로 증권사에 전송 → 주문 상태 publish
+- **tracker**: 계좌 잔고/포지션/체결 stream 추적 → 계좌·체결 스냅샷 영속화
+- **detector**: 리스크 + 정보 + 지표 조합 → 경보 생성
+- **notifier**: signal/decision/order/alert 이벤트 소비 → notification outbox dispatch
 
 ### 워커가 하지 않는 일
 - FE 직접 통신 (HTTP/WS 모두 금지)
@@ -55,12 +57,16 @@ BE와 동일.
 |---|---|---|---|
 | collector | O | scheduler (cron/interval), platform WS subscriber | DB write + `live:*` pubsub |
 | calculator | X | queue consumer (closed candle 등 upstream 이벤트), scheduler | DB write + `derived:*` pubsub |
-| executor | O | queue consumer (signal/decision), platform WS subscriber (체결 stream) | DB write + 주문 호출 + `account:*` / `order:*` pubsub |
-| detector | X | queue consumer, scheduler | DB write + 알림 채널 호출 + `alert:*` pubsub |
+| executor | O | scheduler / queue consumer | 주문/취소/수정 broker 호출 + `order:*` pubsub |
+| tracker | O | scheduler, platform WS subscriber (체결 stream) | account balance / position / fill DB write + `account:*` / `order:*` pubsub |
+| detector | X | queue consumer, scheduler | alert DB write + `alert:*` pubsub |
+| notifier | O (notify only) | queue consumer, scheduler | notification outbox / delivery DB write + 외부 알림 채널 호출 |
 
 ### 역할 분리 원칙
 - calculator/detector 는 platform 코드와 의존성을 갖지 않는다 (external 모듈 import 금지). 컴파일타임에 격리.
-- collector/executor 는 vendor 계층을 통해서만 외부 호출. apiClient 직접 호출 금지.
+- collector/executor/tracker/notifier 는 vendor 계층을 통해서만 외부 호출. apiClient 직접 호출 금지.
+- collector 는 collector credential pool만 사용한다. executor/tracker 는 account-scoped executor credential pool을 공유한다.
+- notifier 는 Notify vendor만 사용하고 BrokerageModule을 import하지 않는다.
 - 역할 간 직접 함수 호출 금지. 통신은 **DB + Redis Streams/BullMQ** 로만.
 
 ---
@@ -76,13 +82,13 @@ BE와 동일.
 | 패턴 | 설정 | 용도 |
 |---|---|---|
 | 단일 역할 단일 팟 | `ROLES=executor`, replica=1 | 초기, 저부하 |
-| 다중 역할 단일 팟 | `ROLES=collector,calculator,detector` | 자원 절약, 운영 단순화 |
+| 다중 역할 단일 팟 | `ROLES=collector,calculator,detector,notifier` | 자원 절약, 운영 단순화 |
 | 단일 역할 다중 팟 (샤딩) | `ROLES=collector`, replica=N, `SHARD_INDEX`/`SHARD_COUNT` | 부하 분산 |
 | 역할별 다중 팟 | 역할별 deployment 분리 | 표준 production |
 
 ### 샤딩 규약
 - collector/calculator의 종목 분배는 `(hash(symbol) % SHARD_COUNT == SHARD_INDEX)` 결정론적 분할
-- executor의 account 분배도 동일 방식 (`hash(accountId) % N`)
+- executor/tracker의 account 분배도 동일 방식 (`hash(accountId) % N`)
 - 샤딩 책임은 각 역할 모듈의 entry layer (scheduler/consumer)에서 결정
 
 ---
@@ -116,8 +122,20 @@ src/
       usecase/
       service/
       repository/
+    tracker/
+      tracker.module.ts
+      trigger/
+      usecase/
+      service/
+      repository/
     detector/
       detector.module.ts
+      trigger/
+      usecase/
+      service/
+      repository/
+    notifier/
+      notifier.module.ts
       trigger/
       usecase/
       service/

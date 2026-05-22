@@ -5,7 +5,7 @@ import { ACCOUNT_STRATEGY_REPOSITORY } from '@shared/persistence/account-strateg
 import type { AccountStrategyRepository } from '@shared/persistence/account-strategy/account-strategy.repository';
 
 const SYMBOL_KEY_PATTERN =
-  /^(symbol|symbols|ticker|tickers|stockSymbol|stockSymbols|stockCode|stockCodes)$/i;
+  /^(symbol|symbols|ticker|tickers|code|codes|stockSymbol|stockSymbols|stockCode|stockCodes|target|targets|targetSymbol|targetSymbols|watch|watches|watchSymbol|watchSymbols|watchList|universe|universeSymbol|universeSymbols|tickList|stkCd|stkCds|instrumentCode|instrumentCodes)$/i;
 const SYMBOL_VALUE_PATTERN = /^[A-Za-z0-9._-]{1,20}$/;
 
 @Injectable()

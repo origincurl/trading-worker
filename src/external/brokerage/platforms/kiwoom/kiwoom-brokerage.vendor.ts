@@ -184,7 +184,10 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<AccountBalanceModel> {
     try {
-      const body: GetAccountBalanceRequestContract = { acntNo: input.accountId };
+      const body: GetAccountBalanceRequestContract = {
+        acntNo: input.accountId,
+        qry_tp: '1',
+      };
 
       const response = await this.opts.apiClient.request<
         GetAccountBalanceRequestContract,
@@ -239,7 +242,11 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<PositionModel[]> {
     try {
-      const body: GetPositionsRequestContract = { acntNo: input.accountId };
+      const body: GetPositionsRequestContract = {
+        acntNo: input.accountId,
+        qry_tp: '1',
+        dmst_stex_tp: 'KRX',
+      };
 
       const response = await this.opts.apiClient.request<
         GetPositionsRequestContract,

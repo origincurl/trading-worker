@@ -1,7 +1,7 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
-import { COLLECTOR_STATUS } from '@roles/role-status';
+import { COLLECTOR_METRICS, COLLECTOR_STATUS } from '@roles/role-status';
 import { CandleEntity } from './repository/candle.entity';
 import { CANDLE_REPOSITORY } from './repository/candle.repository';
 import { CandleRepositoryImpl } from './repository/candle.repository.impl';
@@ -26,14 +26,12 @@ import { SubscriptionPlannerService } from './service/subscription-planner.servi
 import { UniverseService } from './service/universe.service';
 import { ChartCatchupConsumer } from './trigger/consumer/chart-catchup.consumer';
 import { CandleFlushScheduler } from './trigger/scheduler/candle-flush.scheduler';
-import { HeartbeatScheduler } from './trigger/scheduler/heartbeat.scheduler';
 import { MarketSnapshotScheduler } from './trigger/scheduler/market-snapshot.scheduler';
 import { StockListSyncScheduler } from './trigger/scheduler/stock-list-sync.scheduler';
 import { UniverseRefreshScheduler } from './trigger/scheduler/universe-refresh.scheduler';
 import { ChartCatchupRequestSubscriber } from './trigger/subscriber/chart-catchup-request.subscriber';
 import { KiwoomTickSubscriber } from './trigger/subscriber/kiwoom-tick.subscriber';
 import { UniverseRefreshHintSubscriber } from './trigger/subscriber/universe-refresh-hint.subscriber';
-import { HeartbeatUsecase } from './usecase/heartbeat.usecase';
 import { IngestTickUsecase } from './usecase/ingest-tick.usecase';
 import { ProcessChartCatchupUsecase } from './usecase/process-chart-catchup.usecase';
 import { RefreshUniverseUsecase } from './usecase/refresh-universe.usecase';
@@ -68,15 +66,14 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     ChartCatchupRequestSubscriber,
     UniverseRefreshHintSubscriber,
     ChartCatchupConsumer,
-    HeartbeatUsecase,
-    HeartbeatScheduler,
     MarketSnapshotScheduler,
     CandleFlushScheduler,
     UniverseRefreshScheduler,
     StockListSyncScheduler,
     { provide: COLLECTOR_STATUS, useExisting: CollectorStatusService },
+    { provide: COLLECTOR_METRICS, useExisting: CollectorStatusService },
   ],
-  exports: [COLLECTOR_STATUS],
+  exports: [COLLECTOR_STATUS, COLLECTOR_METRICS],
 })
 export class CollectorModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(CollectorModule.name);

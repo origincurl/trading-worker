@@ -5,6 +5,9 @@ import type { BrokerageVendorProfile } from '../../brokerage.token';
 import type { RateLimiter } from '../../service/rate-limiter.service';
 import type {
   CredentialUsageContext,
+  CredentialUsageActionType,
+  CredentialUsageOrigin,
+  CredentialUsagePriority,
   CredentialUsageService,
 } from '../../credential/credential-usage.service';
 import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
@@ -48,6 +51,12 @@ export interface KiwoomRequestOptions<TRequest> {
   readonly contYn?: 'Y' | 'N';
   readonly nextKey?: string;
   readonly tokenSupplier?: KiwoomTokenSupplier;
+  readonly usage?: {
+    readonly origin?: CredentialUsageOrigin;
+    readonly priority?: CredentialUsagePriority;
+    readonly actionType?: CredentialUsageActionType;
+    readonly endpointType?: string;
+  };
 }
 
 // Single entry for all REST calls — concentrates rate-limit + auth in one place.
@@ -218,10 +227,11 @@ export class KiwoomApiClient {
       };
 
       try {
-        if (initialTokenResult.credential && this.opts.usage) {
+        const usageCredential = mergeUsageContext(initialTokenResult.credential, options.usage);
+        if (usageCredential && this.opts.usage) {
           return await this.opts.usage.runRest(
             this.opts.profile,
-            initialTokenResult.credential,
+            usageCredential,
             endpointLabel(endpointPath),
             () => request(initialTokenResult, true),
           );
@@ -353,6 +363,18 @@ function endpointLabel(endpointPath: string): string {
   if (endpointPath.includes('/mrkcond')) return 'REST_MARKET_STATS';
 
   return endpointPath;
+}
+
+function mergeUsageContext(
+  credential: CredentialUsageContext | null,
+  usage: KiwoomRequestOptions<unknown>['usage'],
+): CredentialUsageContext | null {
+  if (!credential) return null;
+
+  return {
+    ...credential,
+    ...usage,
+  };
 }
 
 function extractReturnFields(parsed: unknown): {

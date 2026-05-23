@@ -178,16 +178,18 @@ function isBrokerAuthFailure(err: unknown): boolean {
 
   const details = err.details as Record<string, unknown> | undefined;
   const httpStatus = details?.httpStatus;
+  const contentType = typeof details?.contentType === 'string' ? details.contentType.toLowerCase() : '';
   const returnCode = String(details?.returnCode ?? '').toLowerCase();
   const returnMsg = typeof details?.returnMsg === 'string' ? details.returnMsg.toLowerCase() : '';
   const message = err.message.toLowerCase();
   const haystack = `${returnCode} ${returnMsg} ${message}`;
 
+  if (contentType.includes('text/html') || haystack.includes('non-json')) return false;
+
   return (
     httpStatus === 401 ||
     httpStatus === 403 ||
     haystack.includes('auth') ||
-    haystack.includes('token') ||
     haystack.includes('invalid') ||
     haystack.includes('unauthorized') ||
     haystack.includes('인증') ||

@@ -22,8 +22,8 @@ import { CredentialCooldownService } from './credential-cooldown.service';
 //
 // Round-robin: each call rotates through the eligible pool so a single
 // credential isn't burned by traffic spikes. Persisted across calls via
-// an in-memory cursor keyed by (brokerage, marketEnv) — process-local
-// only (other pods rotate independently).
+// an in-memory cursor keyed by (brokerage, marketEnv, endpoint) —
+// process-local only (other pods rotate independently).
 @Injectable()
 export class CredentialSourceService {
   private readonly logger = new Logger(CredentialSourceService.name);
@@ -53,6 +53,31 @@ export class CredentialSourceService {
     marketEnv: MarketEnv,
     endpoint: 'REST' | 'WS' = 'REST',
   ): Promise<BrokerageCredentialMaterial> {
+    const eligible = await this.listCollectorCredentials(brokerage, marketEnv, endpoint);
+
+    if (eligible.length === 0) {
+      throw new DomainError(
+        `no usable collector credential for brokerage=${brokerage} env=${marketEnv}`,
+        'COLLECTOR_CREDENTIAL_EXHAUSTED',
+        { brokerage, marketEnv, totalActive: 0, eligible: 0, exclusions: {} },
+      );
+    }
+
+    const cursorKey = `${brokerage}:${marketEnv}:${endpoint}`;
+    const cursor =
+      this.collectorCursor.get(cursorKey) ?? Math.floor(Math.random() * eligible.length);
+    const picked = eligible[cursor % eligible.length];
+
+    this.collectorCursor.set(cursorKey, cursor + 1);
+
+    return picked;
+  }
+
+  async listCollectorCredentials(
+    brokerage: Brokerage,
+    marketEnv: MarketEnv,
+    endpoint: 'REST' | 'WS' = 'REST',
+  ): Promise<BrokerageCredentialMaterial[]> {
     const all = await this.collectorRepo.findActive(brokerage, marketEnv);
     const limitState = await this.collectorLimitRepo.findByCredentialIds(all.map((c) => c.id));
     const now = Date.now();
@@ -81,32 +106,29 @@ export class CredentialSourceService {
       );
     }
 
-    const cursorKey = `${brokerage}:${marketEnv}`;
-    const cursor =
-      this.collectorCursor.get(cursorKey) ?? Math.floor(Math.random() * eligible.length);
-    const picked = eligible[cursor % eligible.length];
+    return eligible.map((picked) => {
+      const appKey = this.encryption.decrypt(picked.appKeyEnc);
+      const appSecret = this.encryption.decrypt(picked.appSecretEnc);
+      const policy = limitState.policies.get(picked.id);
 
-    this.collectorCursor.set(cursorKey, cursor + 1);
+      if (!appKey || !appSecret) {
+        throw new DomainError(
+          `collector credential id=${picked.id} missing appKey/appSecret material`,
+          'COLLECTOR_CREDENTIAL_MATERIAL_MISSING',
+          { credentialId: picked.id },
+        );
+      }
 
-    const appKey = this.encryption.decrypt(picked.appKeyEnc);
-    const appSecret = this.encryption.decrypt(picked.appSecretEnc);
-
-    if (!appKey || !appSecret) {
-      throw new DomainError(
-        `collector credential id=${picked.id} missing appKey/appSecret material`,
-        'COLLECTOR_CREDENTIAL_MATERIAL_MISSING',
-        { credentialId: picked.id },
-      );
-    }
-
-    return {
-      kind: 'collector',
-      credentialId: picked.id,
-      brokerage: picked.brokerage,
-      marketEnv: picked.marketEnv,
-      appKey,
-      appSecret,
-    };
+      return {
+        kind: 'collector',
+        credentialId: picked.id,
+        brokerage: picked.brokerage,
+        marketEnv: picked.marketEnv,
+        appKey,
+        appSecret,
+        wsMaxSymbols: policy?.wsMaxSymbols ?? null,
+      };
+    });
   }
 
   private collectorExclusionReason(
@@ -128,6 +150,22 @@ export class CredentialSourceService {
       return 'COOLDOWN_PENDING';
     }
     if (status === CollectorCredentialRuntimeStatus.AuthFailed) return 'AUTH_FAILED';
+    if (
+      endpoint === 'WS' &&
+      policy?.wsMaxConnections !== null &&
+      policy?.wsMaxConnections !== undefined &&
+      policy.wsMaxConnections <= 0
+    ) {
+      return 'WS_CONNECTIONS_DISABLED';
+    }
+    if (
+      endpoint === 'WS' &&
+      policy?.wsMaxSymbols !== null &&
+      policy?.wsMaxSymbols !== undefined &&
+      policy.wsMaxSymbols <= 0
+    ) {
+      return 'WS_SYMBOLS_DISABLED';
+    }
 
     return null;
   }

@@ -1,7 +1,7 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
-import { TRACKER_STATUS } from '@roles/role-status';
+import { TRACKER_METRICS, TRACKER_STATUS } from '@roles/role-status';
 import {
   ORDER_FILL_REPOSITORY,
   OrderFillRepositoryImpl,
@@ -18,11 +18,10 @@ import { AccountPositionService } from './service/account-position.service';
 import { ExecutionService } from './service/execution.service';
 import { TrackerStatusService } from './service/tracker-status.service';
 import { TrackerTargetService } from './service/tracker-target.service';
+import { TrackerWsOwnershipService } from './service/tracker-ws-ownership.service';
 import { AccountBalanceScheduler } from './trigger/scheduler/account-balance.scheduler';
 import { AccountPositionScheduler } from './trigger/scheduler/account-position.scheduler';
-import { HeartbeatScheduler } from './trigger/scheduler/heartbeat.scheduler';
 import { KiwoomExecutionSubscriber } from './trigger/subscriber/kiwoom-execution.subscriber';
-import { HeartbeatUsecase } from './usecase/heartbeat.usecase';
 import { IngestExecutionUsecase } from './usecase/ingest-execution.usecase';
 import { SyncAccountBalanceUsecase } from './usecase/sync-account-balance.usecase';
 import { SyncAccountPositionUsecase } from './usecase/sync-account-position.usecase';
@@ -39,6 +38,7 @@ import { SyncAccountPositionUsecase } from './usecase/sync-account-position.usec
   providers: [
     TrackerStatusService,
     TrackerTargetService,
+    TrackerWsOwnershipService,
     AccountBalanceService,
     AccountPositionService,
     ExecutionService,
@@ -51,14 +51,13 @@ import { SyncAccountPositionUsecase } from './usecase/sync-account-position.usec
     SyncAccountBalanceUsecase,
     SyncAccountPositionUsecase,
     IngestExecutionUsecase,
-    HeartbeatUsecase,
     KiwoomExecutionSubscriber,
     AccountBalanceScheduler,
     AccountPositionScheduler,
-    HeartbeatScheduler,
     { provide: TRACKER_STATUS, useExisting: TrackerStatusService },
+    { provide: TRACKER_METRICS, useExisting: TrackerStatusService },
   ],
-  exports: [TRACKER_STATUS],
+  exports: [TRACKER_STATUS, TRACKER_METRICS],
 })
 export class TrackerModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(TrackerModule.name);

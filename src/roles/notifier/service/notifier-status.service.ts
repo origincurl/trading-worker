@@ -1,8 +1,8 @@
 import { Injectable } from '@nestjs/common';
-import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
+import type { RoleMetricProvider, RoleStatus, RoleStatusProvider } from '@roles/role-status';
 
 @Injectable()
-export class NotifierStatusService implements RoleStatusProvider {
+export class NotifierStatusService implements RoleStatusProvider, RoleMetricProvider {
   private readonly bootedAt = Date.now();
 
   private _ingested = 0;
@@ -59,6 +59,20 @@ export class NotifierStatusService implements RoleStatusProvider {
 
   lastDispatchAt(): Date | null {
     return this._lastDispatchAt;
+  }
+
+  getRoleMetrics() {
+    return {
+      role: 'notifier' as const,
+      metrics: {
+        ingested: this._ingested,
+        outbox_rows_created: this._outboxRowsCreated,
+        dispatched: this._dispatched,
+        dispatch_failures: this._dispatchFailures,
+        last_ingested_at: this._lastIngestedAt?.toISOString() ?? null,
+        last_dispatch_at: this._lastDispatchAt?.toISOString() ?? null,
+      },
+    };
   }
 
   getStatus(): RoleStatus {

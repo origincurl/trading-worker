@@ -142,6 +142,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   private activeWsCredential: CredentialUsageContext | null = null;
 
+  private lastSystemCloseReason: string | null = null;
+
   constructor(private readonly opts: KiwoomBrokerageVendorOptions) {
     this.logger = new Logger(`KiwoomBrokerageVendor[${opts.profile}]`);
   }
@@ -192,6 +194,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ACCOUNT,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'TRACKER_ACCOUNT',
+          priority: 'P3',
+          actionType: 'ACCOUNT_SYNC',
+          endpointType: 'REST_ACCOUNT',
+        },
       });
 
       return {
@@ -241,6 +249,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ACCOUNT,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'TRACKER_ACCOUNT',
+          priority: 'P3',
+          actionType: 'ACCOUNT_SYNC',
+          endpointType: 'REST_ACCOUNT',
+        },
       });
 
       const snapshotAt = new Date().toISOString();
@@ -345,6 +359,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId,
         endpointPath: PATH_CHART,
         body,
+        usage: {
+          origin: 'COLLECTOR_MARKET',
+          priority: 'P2',
+          actionType: 'MARKET_DATA',
+          endpointType: 'REST_CHART',
+        },
       });
 
       const rows = isMinute
@@ -444,6 +464,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
             apiId: APIID_STOCK_MASTER,
             endpointPath: PATH_STOCK_INFO,
             body: { mrkt_tp: mrktTp },
+            usage: {
+              origin: 'COLLECTOR_MARKET',
+              priority: 'P2',
+              actionType: 'MARKET_DATA',
+              endpointType: 'REST_MARKET_STATS',
+            },
           });
 
           const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
@@ -506,6 +532,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           apiId: APIID_INDEX_CURRENT,
           endpointPath: PATH_SECTOR,
           body: { inds_cd: indexCode, mrkt_tp: indexCode },
+          usage: {
+            origin: 'COLLECTOR_MARKET',
+            priority: 'P2',
+            actionType: 'MARKET_DATA',
+            endpointType: 'REST_MARKET_STATS',
+          },
         });
         const raw = normalizeIndexResponse(response, symbol);
 
@@ -540,12 +572,18 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     this.loginHalted = false;
 
+    this.lastSystemCloseReason = null;
+
     this.opts.wsClient.onMessage((parsed) => this.routeFrame(parsed));
 
     this.opts.wsClient.onClose((code, reason) => {
       this.loggedIn = false;
       if (this.activeWsCredential) {
-        this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+        this.opts.usage?.markWsDisconnected(
+          this.opts.profile,
+          this.activeWsCredential,
+          this.lastSystemCloseReason ?? undefined,
+        );
 
         this.activeWsCredential = null;
       }
@@ -591,6 +629,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     this.consecutiveLoginFailures = 0;
 
     this.loginHalted = false;
+
+    this.lastSystemCloseReason = null;
 
     await this.opts.wsClient.disconnect();
   }
@@ -736,6 +776,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'ORDER',
+          endpointType: 'REST_ORDER',
+        },
       });
 
       return mapOrderResponseToAck(response, 'accepted');
@@ -765,6 +811,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'CANCEL',
+          endpointType: 'REST_ORDER',
+        },
       });
 
       return mapOrderResponseToAck(response, 'cancelled');
@@ -796,6 +848,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'MODIFY',
+          endpointType: 'REST_ORDER',
+        },
       });
 
       return mapOrderResponseToAck(response, 'accepted');
@@ -817,9 +875,31 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       return;
     }
 
+    if (trnm === 'SYSTEM' && isPlainObject(parsed)) {
+      void this.handleSystemFrame(parsed);
+
+      return;
+    }
+
     if (trnm === 'LOGIN' || trnm === 'REG' || trnm === 'REMOVE') return;
 
     this.frameHandler?.(parsed);
+  }
+
+  private async handleSystemFrame(parsed: Record<string, unknown>): Promise<void> {
+    const code = typeof parsed.code === 'string' ? parsed.code : null;
+    const message = typeof parsed.message === 'string' ? parsed.message : 'Kiwoom SYSTEM frame';
+
+    this.logger.warn(`SYSTEM code=${code ?? '<unknown>'} message="${message}"`);
+    this.lastSystemCloseReason = `Kiwoom SYSTEM ${code ?? '<unknown>'}: ${message}`;
+
+    if (code !== 'R10001') return;
+
+    // Kiwoom sends R10001 when another session uses the same AppKey, then closes
+    // this socket with code=1000/Bye. Reconnecting immediately just creates a
+    // session fight, so mark this credential limited and let fan-out redistribute.
+    this.loginHalted = true;
+    await this.recordWsLimited(new Error(`Kiwoom SYSTEM ${code}: ${message}`));
   }
 
   private installLoginAckGate(): Promise<void> {
@@ -911,6 +991,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     }
 
     this.activeWsCredential = tokenResult.credential;
+    this.lastSystemCloseReason = null;
     if (tokenResult.credential) {
       if (this.opts.profile === 'collector' && tokenResult.credential.kind === 'collector') {
         await this.opts.collectorRuntimeState?.markSuccess({
@@ -918,6 +999,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           source: 'WS',
         });
       }
+      // Tracker execution WS must pass TRACKER_STATUS/WS overrides before it is enabled.
+      // The current active path is collector-only, where default COLLECTOR_MARKET is correct.
       this.opts.usage?.markWsConnected(
         this.opts.profile,
         tokenResult.credential,
@@ -1061,6 +1144,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private recordWsSymbolUsage(): void {
     if (!this.activeWsCredential) return;
 
+    // Tracker execution WS must pass origin/action overrides before it is enabled.
+    // The current active path is collector-only, where default COLLECTOR_MARKET is correct.
     this.opts.usage?.markWsSymbols(
       this.opts.profile,
       this.activeWsCredential,

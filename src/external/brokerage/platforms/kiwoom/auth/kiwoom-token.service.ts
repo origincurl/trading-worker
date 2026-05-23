@@ -66,7 +66,22 @@ export class KiwoomTokenService {
       clearTimeout(timer);
     }
 
-    const body = (await safeJson(response)) as KiwoomTokenResponse;
+    const contentType = response.headers.get('content-type');
+    const parsed = await safeJson(response);
+    if (parsed === undefined) {
+      throw new IntegrationError(
+        'Kiwoom /oauth2/token returned non-JSON body (likely maintenance page)',
+        {
+          credentialId: material.credentialId,
+          httpStatus: response.status,
+          contentType,
+        },
+      );
+    }
+    const body: KiwoomTokenResponse =
+      parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? (parsed as KiwoomTokenResponse)
+        : {};
     const returnCode =
       body.return_code === undefined || body.return_code === null ? null : String(body.return_code);
 

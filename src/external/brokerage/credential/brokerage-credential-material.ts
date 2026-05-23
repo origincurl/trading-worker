@@ -13,4 +13,5 @@ export interface BrokerageCredentialMaterial {
   readonly marketEnv: MarketEnv;
   readonly appKey: string;
   readonly appSecret: string;
+  readonly wsMaxSymbols?: number | null;
 }

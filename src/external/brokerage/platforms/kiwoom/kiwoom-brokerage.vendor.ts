@@ -245,6 +245,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       const body: GetPositionsRequestContract = {
         acntNo: input.accountId,
         qry_tp: '1',
+        // Phase 1 is KRX-only for account positions. Switch this policy to
+        // SOR or venue-aware lookup when NXT/SOR account handling is enabled.
         dmst_stex_tp: 'KRX',
       };
 

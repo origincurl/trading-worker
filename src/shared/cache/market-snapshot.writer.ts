@@ -60,6 +60,22 @@ export class MarketSnapshotWriter {
     });
   }
 
+  async readIndex(
+    input: Pick<MarketIndexPayload, 'provider' | 'marketEnv' | 'symbol'>,
+  ): Promise<MarketIndexSnapshotCacheEntry | null> {
+    if (!this.client) return null;
+
+    const key = `${NAMESPACE}:v1:index:latest:${input.provider}:${input.marketEnv}:${input.symbol}`;
+    const value = await this.client.get(key);
+    if (!value) return null;
+
+    try {
+      return JSON.parse(value) as MarketIndexSnapshotCacheEntry;
+    } catch {
+      return null;
+    }
+  }
+
   async writeFx(entry: FxRateCacheEntry): Promise<void> {
     if (!this.client) {
       this.logger.debug('Redis disabled, skipping fx snapshot write');

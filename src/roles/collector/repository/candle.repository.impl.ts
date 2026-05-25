@@ -162,7 +162,7 @@ export class CandleRepositoryImpl implements CandleRepository, OnApplicationBoot
       ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_source varchar(32) NOT NULL DEFAULT 'unknown'
     `);
     await this.dataSource.query(`
-      ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_market varchar(16) NOT NULL DEFAULT 'UNKNOWN'
+      ALTER TABLE market_candles ADD COLUMN IF NOT EXISTS chart_market varchar(16) NOT NULL DEFAULT 'KRW'
     `);
     await this.dataSource.query(`
       UPDATE market_candles

@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { DomainError, IntegrationError, NotImplementedError } from '@common/error/domain.error';
 import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
-import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import type {
+  CandleChartMarket,
+  MarketCandleClosedPayload,
+} from '@shared/event/market-candle-closed.event';
 import {
   MARKET_INDEX_CODES,
   MARKET_INDEX_NAMES,
@@ -349,17 +352,19 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   async fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]> {
     try {
-      const baseDt = toYyyyMmDd(input.toIso);
+      const baseDt = input.baseDt ?? toYyyyMmDd(input.toIso);
       const isMinute = input.intervalType === '1m';
       const apiId = isMinute ? APIID_CHART_MINUTE : APIID_CHART_DAILY;
+      const chartMarket = input.chartMarket ?? (input.marketEnv === 'production' ? 'AL' : 'KRW');
+      const requestSymbol = toKiwoomChartSymbol(input.symbol, chartMarket);
       const body: FetchChartCandlesRequestContract = isMinute
         ? {
-            stk_cd: input.symbol,
+            stk_cd: requestSymbol,
             base_dt: baseDt,
             tic_scope: '1' /* 1분봉 */,
             upd_stkpc_tp: '1' /* 수정주가반영 */,
           }
-        : { stk_cd: input.symbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
+        : { stk_cd: requestSymbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
 
       const response = await this.opts.apiClient.request<
         FetchChartCandlesRequestContract,
@@ -374,14 +379,25 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           actionType: 'MARKET_DATA',
           endpointType: 'REST_CHART',
         },
+        meta: {
+          requestId: input.requestId,
+          symbol: input.symbol,
+          intervalType: input.intervalType,
+          chartMarket,
+          baseDt,
+          fromIso: input.fromIso,
+          toIso: input.toIso,
+          acceptFromIso: input.acceptFromIso,
+          acceptToIso: input.acceptToIso,
+        },
       });
 
       const rows = isMinute
         ? (response.stk_min_pole_chart_qry ?? [])
         : (response.stk_dt_pole_chart_qry ?? []);
 
-      const fromMs = Date.parse(input.fromIso);
-      const toMs = Date.parse(input.toIso);
+      const fromMs = Date.parse(input.acceptFromIso ?? input.fromIso);
+      const toMs = Date.parse(input.acceptToIso ?? input.toIso);
       const intervalMs = isMinute ? 60_000 : 24 * 3_600_000;
       const out: MarketCandleClosedPayload[] = [];
 
@@ -417,7 +433,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           symbol: input.symbol,
           market: 'unknown',
           chartSource: 'broker_chart_REST',
-          chartMarket: input.chartMarket ?? 'KRW',
+          chartMarket,
           intervalType: '1m',
           bucketStart,
           bucketEnd,
@@ -1437,6 +1453,21 @@ function parseKiwoomCandleTs(
   if ([y, mo, d].some((v) => Number.isNaN(v))) return null;
 
   return Date.UTC(y, mo, d) - KST_OFFSET_MS;
+}
+
+function toKiwoomChartSymbol(symbol: string, chartMarket: CandleChartMarket): string {
+  if (chartMarket === 'AL') {
+    return symbol.endsWith('_AL') ? symbol : `${stripKiwoomVenueSuffix(symbol)}_AL`;
+  }
+  if (chartMarket === 'NXT') {
+    return symbol.endsWith('_NX') ? symbol : `${stripKiwoomVenueSuffix(symbol)}_NX`;
+  }
+
+  return stripKiwoomVenueSuffix(symbol);
+}
+
+function stripKiwoomVenueSuffix(symbol: string): string {
+  return symbol.replace(/_(AL|NX)$/u, '');
 }
 
 function mapOrderResponseToAck(

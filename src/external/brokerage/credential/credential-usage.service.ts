@@ -38,6 +38,9 @@ export interface CredentialUsageHistoryEntry {
   readonly at: string;
   readonly level: 'info' | 'warn' | 'error';
   readonly message: string;
+  readonly apiId?: string;
+  readonly endpointPath?: string;
+  readonly meta?: Record<string, string>;
 }
 
 export interface CredentialUsageSnapshot {
@@ -61,6 +64,7 @@ export interface CredentialUsageSnapshot {
   readonly coalesced: number;
   readonly sharedLimiter: 'disabled' | 'enabled';
   readonly limiterConfig?: RateLimitConfig;
+  readonly restQueue?: RestQueueStateSnapshot;
   readonly inFlight: number;
   readonly wsConnections: number;
   readonly wsSymbols: number;
@@ -70,6 +74,15 @@ export interface CredentialUsageSnapshot {
   readonly lastError: string | null;
   readonly wsSymbolList: readonly string[];
   readonly history: readonly CredentialUsageHistoryEntry[];
+}
+
+export interface RestQueueStateSnapshot {
+  readonly measuredRps: number | null;
+  readonly bucketSecond: number | null;
+  readonly bucketCount: number;
+  readonly queued: number;
+  readonly nextAvailableAt: string | null;
+  readonly waitMs: number;
 }
 
 interface MutableStats {
@@ -92,6 +105,7 @@ interface MutableStats {
   coalesced: number;
   sharedLimiter: 'disabled' | 'enabled';
   limiterConfig?: RateLimitConfig;
+  restQueue?: MutableRestQueueState;
   inFlight: number;
   wsConnections: number;
   wsSymbols: number;
@@ -107,6 +121,14 @@ interface RateLimitConfig {
   readonly capacity: number;
   readonly refillPerSecond: number;
   readonly maxConcurrent: number;
+}
+
+interface MutableRestQueueState {
+  measuredRps: number | null;
+  bucketSecond: number | null;
+  bucketCount: number;
+  queued: number;
+  nextAvailableAt: Date | null;
 }
 
 type PolicyValue = {
@@ -145,6 +167,11 @@ export class CredentialUsageService {
     credential: CredentialUsageContext,
     endpoint: string,
     fn: () => Promise<T>,
+    request?: {
+      readonly apiId?: string;
+      readonly endpointPath?: string;
+      readonly meta?: Record<string, string | number | boolean | null | undefined>;
+    },
   ): Promise<T> {
     const stats = this.getStats(profile, credential, endpoint);
     const limiter = this.getLimiter(profile, credential, endpoint);
@@ -154,7 +181,7 @@ export class CredentialUsageService {
     stats.limiterConfig = config;
     stats.requests += 1;
     stats.lastUsedAt = new Date();
-    this.pushHistory(stats, 'info', `REST ${endpoint} request queued`);
+    this.pushHistory(stats, 'info', `REST ${endpoint} request queued`, request);
 
     try {
       sharedLease = await this.sharedLimiter?.acquire({
@@ -175,7 +202,7 @@ export class CredentialUsageService {
       stats.failures += 1;
       stats.lastFailureAt = new Date();
       stats.lastError = redactPotentialSecrets(err instanceof Error ? err.message : String(err));
-      this.pushHistory(stats, 'warn', `REST ${endpoint} rate-limited: ${stats.lastError}`);
+      this.pushHistory(stats, 'warn', `REST ${endpoint} rate-limited: ${stats.lastError}`, request);
       throw err;
     }
 
@@ -188,7 +215,7 @@ export class CredentialUsageService {
       stats.successes += 1;
       stats.lastSuccessAt = new Date();
       stats.lastError = null;
-      this.pushHistory(stats, 'info', `REST ${endpoint} success`);
+      this.pushHistory(stats, 'info', `REST ${endpoint} success`, request);
 
       return result;
     } catch (err) {
@@ -203,6 +230,7 @@ export class CredentialUsageService {
         stats,
         isBrokerRateLimitError(err) ? 'warn' : 'error',
         `REST ${endpoint} failed: ${stats.lastError}`,
+        request,
       );
       throw err;
     } finally {
@@ -258,9 +286,35 @@ export class CredentialUsageService {
     this.pushHistory(stats, 'info', `WS symbols changed; symbols=${symbols}`);
   }
 
+  markRestQueueState(
+    profile: BrokerageVendorProfile,
+    credential: CredentialUsageContext,
+    endpoint: string,
+    state: {
+      readonly measuredRps: number | null;
+      readonly bucketSecond: number | null;
+      readonly bucketCount: number;
+      readonly queued: number;
+      readonly nextAvailableAtMs: number | null;
+    },
+  ): void {
+    const stats = this.getStats(profile, credential, endpoint);
+
+    stats.restQueue = {
+      measuredRps: state.measuredRps,
+      bucketSecond: state.bucketSecond,
+      bucketCount: state.bucketCount,
+      queued: Math.max(0, state.queued),
+      nextAvailableAt:
+        state.nextAvailableAtMs !== null ? new Date(state.nextAvailableAtMs) : null,
+    };
+  }
+
   snapshot(): CredentialUsageSnapshot[] {
     const sharedLimiterState: CredentialUsageSnapshot['sharedLimiter'] =
       this.sharedLimiter?.isEnabled() ? 'enabled' : 'disabled';
+
+    const now = Date.now();
 
     return Array.from(this.stats.entries())
       .map(([key, value]) => ({
@@ -284,6 +338,18 @@ export class CredentialUsageService {
         coalesced: value.coalesced,
         sharedLimiter: sharedLimiterState,
         limiterConfig: value.limiterConfig,
+        restQueue: value.restQueue
+          ? {
+              measuredRps: value.restQueue.measuredRps,
+              bucketSecond: value.restQueue.bucketSecond,
+              bucketCount: value.restQueue.bucketCount,
+              queued: value.restQueue.queued,
+              nextAvailableAt: value.restQueue.nextAvailableAt?.toISOString() ?? null,
+              waitMs: value.restQueue.nextAvailableAt
+                ? Math.max(0, value.restQueue.nextAvailableAt.getTime() - now)
+                : 0,
+            }
+          : undefined,
         inFlight: value.inFlight,
         wsConnections: value.wsConnections,
         wsSymbols: value.wsSymbols,
@@ -327,6 +393,7 @@ export class CredentialUsageService {
       coalesced: 0,
       sharedLimiter: this.sharedLimiter?.isEnabled() ? 'enabled' : 'disabled',
       limiterConfig: undefined,
+      restQueue: undefined,
       inFlight: 0,
       wsConnections: 0,
       wsSymbols: 0,
@@ -423,17 +490,47 @@ export class CredentialUsageService {
     return `${profile}:${credential.kind}:${credential.credentialId}:${credential.accountId ?? 'none'}:${endpointType}`;
   }
 
-  private pushHistory(stats: MutableStats, level: CredentialUsageHistoryEntry['level'], message: string): void {
+  private pushHistory(
+    stats: MutableStats,
+    level: CredentialUsageHistoryEntry['level'],
+    message: string,
+    request?: {
+      readonly apiId?: string;
+      readonly endpointPath?: string;
+      readonly meta?: Record<string, string | number | boolean | null | undefined>;
+    },
+  ): void {
+    const meta = normalizeHistoryMeta(request?.meta);
+
     stats.history.push({
       at: new Date().toISOString(),
       level,
       message,
+      ...(request?.apiId ? { apiId: request.apiId } : {}),
+      ...(request?.endpointPath ? { endpointPath: request.endpointPath } : {}),
+      ...(meta ? { meta } : {}),
     });
 
     if (stats.history.length > MAX_HISTORY_ENTRIES) {
       stats.history.splice(0, stats.history.length - MAX_HISTORY_ENTRIES);
     }
   }
+}
+
+function normalizeHistoryMeta(
+  value: Record<string, string | number | boolean | null | undefined> | undefined,
+): Record<string, string> | undefined {
+  if (!value) return undefined;
+
+  const entries = Object.entries(value).flatMap(([key, raw]) => {
+    if (raw === null || raw === undefined || raw === '') return [];
+
+    return [[key, String(raw)] as const];
+  });
+
+  if (entries.length === 0) return undefined;
+
+  return Object.fromEntries(entries);
 }
 
 function normalizeSymbolList(symbols: readonly string[]): string[] {

@@ -59,15 +59,20 @@ export interface MarketDataSubscription {
 }
 
 // Phase E: chart catchup. Collector calls this to backfill closed candles
-// for a (symbol, intervalType) range. Returned rows are filtered to the
-// half-open [fromIso, toIso) window and ordered ascending by bucketStart.
+// for a (symbol, intervalType) range. Kiwoom chart APIs are anchor based:
+// baseDt is sent to the broker, while acceptFrom/acceptTo decide which rows
+// are persisted from the returned cap-sized batch.
 export interface FetchChartCandlesInput {
+  readonly requestId?: string;
   readonly symbol: string;
   readonly marketEnv: 'mock' | 'production';
   readonly chartMarket?: CandleChartMarket;
   readonly intervalType: '1m' | '1d';
   readonly fromIso: string;
   readonly toIso: string;
+  readonly baseDt?: string;
+  readonly acceptFromIso?: string;
+  readonly acceptToIso?: string;
 }
 
 // Phase E: stock master list. One entry per listed symbol on a given

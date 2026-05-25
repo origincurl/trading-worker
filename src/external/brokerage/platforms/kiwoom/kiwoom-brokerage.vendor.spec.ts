@@ -105,6 +105,40 @@ describe('KiwoomBrokerageVendor.fetchChartCandles', () => {
     expect(candles[0]?.bucketStart).toBe('2026-05-20T00:00:00.000Z');
   });
 
+  it('maps AL chart market to Kiwoom _AL request symbol while persisting base symbol', async () => {
+    const requests: Array<KiwoomRequestOptions<unknown>> = [];
+    const vendor = makeVendor(
+      {
+        stk_min_pole_chart_qry: [
+          {
+            cntr_tm: '20260520090000',
+            open_pric: '274000',
+            high_pric: '274500',
+            low_pric: '273500',
+            cur_prc: '274250',
+            trde_qty: '1200',
+          },
+        ],
+      },
+      requests,
+    );
+
+    const candles = await vendor.fetchChartCandles({
+      symbol: '005930',
+      marketEnv: 'production',
+      chartMarket: 'AL',
+      intervalType: '1m',
+      fromIso: '2026-05-20T00:00:00.000Z',
+      toIso: '2026-05-20T00:01:00.000Z',
+    });
+
+    expect(requests[0]?.body).toMatchObject({ stk_cd: '005930_AL' });
+    expect(candles[0]).toMatchObject({
+      symbol: '005930',
+      chartMarket: 'AL',
+    });
+  });
+
   it('maps daily candle dates from KST midnight to UTC buckets', async () => {
     const requests: Array<KiwoomRequestOptions<unknown>> = [];
     const vendor = makeVendor(

@@ -11,6 +11,7 @@ import { ExecutorOrderService } from './service/executor-order.service';
 import { ExecutorStatusService } from './service/executor-status.service';
 import { SignalDetectedConsumer } from './trigger/consumer/signal-detected.consumer';
 import { OrderPickupScheduler } from './trigger/scheduler/order-pickup.scheduler';
+import { OrderCommandSubscriber } from './trigger/subscriber/order-command.subscriber';
 import { PickupCancellingOrdersUsecase } from './usecase/pickup-cancelling-orders.usecase';
 import { PickupRequestedOrdersUsecase } from './usecase/pickup-requested-orders.usecase';
 import { PlaceOrderUsecase } from './usecase/place-order.usecase';
@@ -31,6 +32,7 @@ import { PlaceOrderUsecase } from './usecase/place-order.usecase';
     PickupRequestedOrdersUsecase,
     PickupCancellingOrdersUsecase,
     OrderPickupScheduler,
+    OrderCommandSubscriber,
     SignalDetectedConsumer,
     { provide: EXECUTOR_STATUS, useExisting: ExecutorStatusService },
     { provide: EXECUTOR_METRICS, useExisting: ExecutorStatusService },

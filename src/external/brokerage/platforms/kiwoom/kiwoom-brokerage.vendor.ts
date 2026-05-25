@@ -73,6 +73,11 @@ export interface KiwoomBrokerageVendorOptions {
   // without needing a back-reference into the token service singleton.
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly accountTokenSupplier?: (accountId: number) => Promise<KiwoomTokenResult>;
+  readonly accountCredentialTokenSupplier?: (
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ) => Promise<KiwoomTokenResult>;
   readonly usage?: CredentialUsageService;
   readonly collectorRuntimeState?: CollectorCredentialLimitRepository;
   // Used by AccessTokenCacheService.invalidate when LOGIN keeps failing.
@@ -308,6 +313,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     return this.executePlaceOrder(input, this.accountTokenSupplier(accountId));
   }
 
+  async placeOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    input: PlaceOrderInput,
+  ): Promise<OrderAckModel> {
+    this.assertProfile('executor', 'placeOrderForAccountCredential');
+
+    return this.executePlaceOrder(
+      input,
+      this.accountCredentialTokenSupplier(accountId, apiCredentialId, accountExternalId),
+    );
+  }
+
   async cancelOrder(input: CancelOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrder');
 
@@ -331,6 +350,21 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       accountExternalId,
       externalOrderId,
       this.accountTokenSupplier(accountId),
+    );
+  }
+
+  async cancelOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    externalOrderId: string,
+  ): Promise<OrderAckModel> {
+    this.assertProfile('executor', 'cancelOrderForAccountCredential');
+
+    return this.executeCancelOrder(
+      accountExternalId,
+      externalOrderId,
+      this.accountCredentialTokenSupplier(accountId, apiCredentialId, accountExternalId),
     );
   }
 
@@ -980,6 +1014,24 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     const supplier = this.opts.accountTokenSupplier;
 
     return () => supplier(accountId);
+  }
+
+  private accountCredentialTokenSupplier(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ): KiwoomTokenSupplier {
+    if (!this.opts.accountCredentialTokenSupplier) {
+      throw new DomainError(
+        'account credential token supplier is not configured',
+        'ACCOUNT_CREDENTIAL_TOKEN_SUPPLIER_MISSING',
+        { profile: this.opts.profile, accountId, apiCredentialId },
+      );
+    }
+
+    const supplier = this.opts.accountCredentialTokenSupplier;
+
+    return () => supplier(accountId, apiCredentialId, accountExternalId);
   }
 
   private async performLogin(): Promise<void> {

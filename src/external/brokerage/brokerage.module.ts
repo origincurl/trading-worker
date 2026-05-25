@@ -119,6 +119,39 @@ function buildKiwoomGateway(
     };
   };
 
+  const accountCredentialTokenSupplier = async (
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ): Promise<KiwoomTokenResult> => {
+    const material = await source.selectAccountCredentialByApiCredential(
+      accountId,
+      apiCredentialId,
+    );
+
+    if (material.accountExternalId !== accountExternalId) {
+      throw new DomainError(
+        'stamped order accountExternalId does not match active account credential',
+        'ACCOUNT_CREDENTIAL_ACCOUNT_MISMATCH',
+        {
+          accountId,
+          apiCredentialId,
+        },
+      );
+    }
+
+    const token = await tokenCache.getAccessToken(material);
+
+    return {
+      token,
+      credential: {
+        kind: 'executor',
+        credentialId: material.credentialId,
+        accountId,
+      },
+    };
+  };
+
   const apiTokenSupplier =
     profile === 'collector' ? collectorRestTokenSupplier : executorTokenSupplier;
   const wsTokenSupplier =
@@ -153,6 +186,8 @@ function buildKiwoomGateway(
     wsClient,
     tokenSupplier: wsTokenSupplier,
     accountTokenSupplier: profile === 'executor' ? accountTokenSupplier : undefined,
+    accountCredentialTokenSupplier:
+      profile === 'executor' ? accountCredentialTokenSupplier : undefined,
     usage,
     collectorRuntimeState,
     invalidateToken: () => {

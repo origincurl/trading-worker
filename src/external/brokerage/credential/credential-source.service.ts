@@ -238,6 +238,61 @@ export class CredentialSourceService {
       credentialId: api.id,
       brokerage: picked.brokerage,
       marketEnv: picked.marketEnv,
+      accountExternalId: picked.accountExternalId,
+      appKey,
+      appSecret,
+    };
+  }
+
+  async selectAccountCredentialByApiCredential(
+    accountId: number,
+    apiCredentialId: number,
+  ): Promise<BrokerageCredentialMaterial> {
+    const all = await this.accountCredRepo.findByAccountId(accountId);
+    const picked = all.find(
+      (c) =>
+        c.isActive &&
+        c.apiCredentialId === apiCredentialId &&
+        c.brokerage &&
+        c.marketEnv &&
+        !this.cooldown.isOnCooldown(apiCredentialId),
+    );
+
+    if (!picked || !picked.brokerage || !picked.marketEnv || picked.apiCredentialId === null) {
+      throw new DomainError(
+        `no usable account credential for accountId=${accountId} apiCredentialId=${apiCredentialId}`,
+        'ACCOUNT_CREDENTIAL_EXHAUSTED',
+        { accountId, apiCredentialId },
+      );
+    }
+
+    const api = await this.apiCredRepo.findById(apiCredentialId);
+
+    if (!api || api.status !== ApiCredentialStatus.Active) {
+      throw new DomainError(
+        `api credential id=${apiCredentialId} not active`,
+        'API_CREDENTIAL_NOT_ACTIVE',
+        { apiCredentialId, status: api?.status },
+      );
+    }
+
+    const appKey = this.encryption.decrypt(api.appKeyEnc);
+    const appSecret = this.encryption.decrypt(api.appSecretEnc);
+
+    if (!appKey || !appSecret) {
+      throw new DomainError(
+        `api credential id=${api.id} missing appKey/appSecret material`,
+        'API_CREDENTIAL_MATERIAL_MISSING',
+        { apiCredentialId: api.id },
+      );
+    }
+
+    return {
+      kind: 'executor',
+      credentialId: api.id,
+      brokerage: picked.brokerage,
+      marketEnv: picked.marketEnv,
+      accountExternalId: picked.accountExternalId,
       appKey,
       appSecret,
     };

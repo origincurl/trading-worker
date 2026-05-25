@@ -11,6 +11,12 @@ export class AccountModel {
   status!: AccountStatus;
   isPaper!: boolean;
   isTradeEnabled!: boolean;
+  killSwitchEnabled!: boolean;
+  killSwitchReason!: string | null;
+  killSwitchActivatedAt!: Date | null;
+  killSwitchActivatedBy!: number | null;
+  killSwitchDeactivatedAt!: Date | null;
+  killSwitchDeactivatedBy!: number | null;
   description!: string | null;
   createdAt!: Date;
   updatedAt!: Date;

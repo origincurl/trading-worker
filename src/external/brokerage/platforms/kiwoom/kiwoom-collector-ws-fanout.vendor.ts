@@ -112,6 +112,20 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     return this.opts.delegate.placeOrderForAccount(accountId, input);
   }
 
+  placeOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    input: PlaceOrderInput,
+  ): Promise<OrderAckModel> {
+    return this.opts.delegate.placeOrderForAccountCredential(
+      accountId,
+      apiCredentialId,
+      accountExternalId,
+      input,
+    );
+  }
+
   cancelOrder(input: CancelOrderInput): Promise<OrderAckModel> {
     return this.opts.delegate.cancelOrder(input);
   }
@@ -122,6 +136,20 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     externalOrderId: string,
   ): Promise<OrderAckModel> {
     return this.opts.delegate.cancelOrderForAccount(accountId, accountExternalId, externalOrderId);
+  }
+
+  cancelOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    externalOrderId: string,
+  ): Promise<OrderAckModel> {
+    return this.opts.delegate.cancelOrderForAccountCredential(
+      accountId,
+      apiCredentialId,
+      accountExternalId,
+      externalOrderId,
+    );
   }
 
   modifyOrder(input: ModifyOrderInput): Promise<OrderAckModel> {

@@ -1,7 +1,9 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DomainError } from '@common/error/domain.error';
 import { EXECUTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
+import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import { ORDER_REPOSITORY } from '@shared/persistence/order/order.token';
 import type { OrderRepository } from '@shared/persistence/order/order.repository';
 import { BUS_STREAMS } from '@shared/bus/bus.token';
@@ -25,6 +27,24 @@ import { OrderType } from '@shared/model/order/order-type.enum';
 import type { OrderModel } from '@shared/model/order/order.model';
 
 const DEFAULT_BATCH_SIZE = 20;
+const ACCOUNT_LOCK_TTL_MS = readPositiveInt(
+  process.env.EXECUTOR_ACCOUNT_LOCK_TTL_MS,
+  60_000,
+);
+const ACCOUNT_LOCK_WAIT_MS = readPositiveInt(
+  process.env.EXECUTOR_ACCOUNT_LOCK_WAIT_MS,
+  30_000,
+);
+const ACCOUNT_LOCK_POLL_MS = readPositiveInt(
+  process.env.EXECUTOR_ACCOUNT_LOCK_POLL_MS,
+  50,
+);
+const RELEASE_LOCK_SCRIPT = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
 
 // Phase J: drains REQUESTED orders the BE has written into the shared
 // `orders` table. The repository atomically claims rows by flipping
@@ -38,11 +58,14 @@ const DEFAULT_BATCH_SIZE = 20;
 export class PickupRequestedOrdersUsecase {
   private readonly logger = new Logger(PickupRequestedOrdersUsecase.name);
 
+  private readonly accountChains = new Map<number, Promise<void>>();
+
   constructor(
     @Inject(ORDER_REPOSITORY) private readonly orders: OrderRepository,
     @Inject(EXECUTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(BUS_STREAMS) private readonly streams: BusStreams,
     private readonly eventFactory: WorkerEventFactory,
+    @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
   ) {}
 
   async execute(batchSize: number = DEFAULT_BATCH_SIZE): Promise<number> {
@@ -66,42 +89,142 @@ export class PickupRequestedOrdersUsecase {
     return processed;
   }
 
+  async executeOrderId(orderId: number): Promise<boolean> {
+    const order = await this.orders.findAndClaimRequestedById(orderId);
+    if (!order) return false;
+
+    await this.processOne(order);
+
+    return true;
+  }
+
   private async processOne(order: OrderModel): Promise<void> {
+    await this.withAccountOrderLock(Number(order.accountId), () =>
+      this.withDistributedAccountLock(Number(order.accountId), () =>
+        this.placeClaimedOrder(order),
+      ).catch((err) => this.failClaimedOrder(order, err)),
+    );
+  }
+
+  private async placeClaimedOrder(order: OrderModel): Promise<void> {
     const placeInput = this.toPlaceInput(order);
 
     try {
-      const ack = await this.gateway.placeOrderForAccount(
+      const apiCredentialId = Number(order.apiCredentialId);
+      if (!Number.isInteger(apiCredentialId) || apiCredentialId <= 0) {
+        throw new DomainError(
+          'manual order is missing apiCredentialId',
+          'ORDER_API_CREDENTIAL_MISSING',
+          {
+            orderId: order.id,
+            accountId: order.accountId,
+          },
+        );
+      }
+
+      const ack = await this.gateway.placeOrderForAccountCredential(
         Number(order.accountId),
+        apiCredentialId,
+        placeInput.accountId,
         placeInput,
       );
 
-      await this.orders.updateStatus(order.id, {
-        status: OrderStatus.Accepted,
-        brokerOrderId: ack.vendorOrderId,
-        externalOrderId: ack.vendorOrderId,
-        acceptedAt: new Date(),
-      });
+      const updated = await this.orders.updateStatusFromExpected(
+        order.id,
+        [OrderStatus.Submitting],
+        {
+          status: OrderStatus.Accepted,
+          brokerOrderId: ack.vendorOrderId,
+          externalOrderId: ack.vendorOrderId,
+          acceptedAt: new Date(),
+        },
+      );
+
+      if (!updated) {
+        const attached = await this.orders.attachBrokerOrderIdFromExpected(
+          order.id,
+          [
+            OrderStatus.Submitting,
+            OrderStatus.CancelRequested,
+            OrderStatus.CancelSubmitting,
+          ],
+          ack.vendorOrderId,
+        );
+        this.logger.warn(
+          `pickup-requested order id=${order.id} accepted ack ignored because status is no longer SUBMITTING; brokerOrderId attach=${attached}`,
+        );
+
+        return;
+      }
 
       await this.publishPlaced(order, ack.vendorOrderId);
     } catch (err) {
-      const code = err instanceof DomainError ? err.code : 'PLACE_ORDER_FAILED';
-      const message = err instanceof Error ? err.message : String(err);
-      // Vendor refused → REJECTED (terminal but vendor-side).
-      // System / infra error → FAILED (terminal but our side).
-      const isRejection = code === 'VENDOR_REJECTED';
-      const nextStatus = isRejection ? OrderStatus.Rejected : OrderStatus.Failed;
+      await this.failClaimedOrder(order, err);
+    }
+  }
 
-      await this.orders.updateStatus(order.id, {
+  private async failClaimedOrder(order: OrderModel, err: unknown): Promise<void> {
+    const code = err instanceof DomainError ? err.code : 'PLACE_ORDER_FAILED';
+    const message = err instanceof Error ? err.message : String(err);
+    // Vendor refused → REJECTED (terminal but vendor-side).
+    // System / infra/lock error → FAILED (terminal but our side). Lock acquisition
+    // failure happens before the broker call, so closing as FAILED avoids a
+    // SUBMITTING orphan without risking a duplicate broker order.
+    const isRejection = code === 'VENDOR_REJECTED';
+    const nextStatus = isRejection ? OrderStatus.Rejected : OrderStatus.Failed;
+
+    const updated = await this.orders.updateStatusFromExpected(
+      order.id,
+      [OrderStatus.Submitting],
+      {
         status: nextStatus,
         failedAt: new Date(),
         failureReason: message.slice(0, 1000),
-      });
+      },
+    );
 
+    if (!updated) {
       this.logger.warn(
-        `pickup-requested order id=${order.id} ${nextStatus}: code=${code} msg=${message}`,
+        `pickup-requested order id=${order.id} ${nextStatus} ignored because status is no longer SUBMITTING: code=${code} msg=${message}`,
       );
 
-      await this.publishFailed(order, code, message);
+      return;
+    }
+
+    this.logger.warn(
+      `pickup-requested order id=${order.id} ${nextStatus}: code=${code} msg=${message}`,
+    );
+
+    await this.publishFailed(order, code, message).catch((publishErr) => {
+      this.logger.warn(
+        `order.failed produce failed orderId=${order.id}: ${
+          publishErr instanceof Error ? publishErr.message : publishErr
+        }`,
+      );
+    });
+  }
+
+  private async withAccountOrderLock(
+    accountId: number,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    const previous = this.accountChains.get(accountId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const tail = previous.catch(() => undefined).then(() => current);
+    this.accountChains.set(accountId, tail);
+
+    await previous.catch(() => undefined);
+    try {
+      await run();
+    } finally {
+      release();
+      if (this.accountChains.get(accountId) === tail) {
+        this.accountChains.delete(accountId);
+      }
     }
   }
 
@@ -112,11 +235,27 @@ export class PickupRequestedOrdersUsecase {
     const type = order.orderMethod === OrderMethod.Limit ? 'limit' : 'market';
     const quantity = Number(order.quantity);
     const price = order.price !== null ? Number(order.price) : undefined;
+    const accountExternalId = order.accountExternalId?.trim();
+    const symbol =
+      typeof order.rawRequest?.symbol === 'string' ? order.rawRequest.symbol.trim() : '';
+
+    if (!accountExternalId) {
+      throw new DomainError(
+        'manual order is missing accountExternalId; refusing to send internal account id to broker',
+        'ORDER_ACCOUNT_EXTERNAL_ID_MISSING',
+        { orderId: order.id, accountId: order.accountId },
+      );
+    }
+    if (!symbol) {
+      throw new DomainError('manual order is missing symbol', 'ORDER_SYMBOL_MISSING', {
+        orderId: order.id,
+      });
+    }
 
     return {
-      accountId: order.accountExternalId ?? String(order.accountId),
+      accountId: accountExternalId,
       clientOrderId: order.clientOrderId ?? `order-${order.id}`,
-      symbol: order.rawRequest?.symbol as string | undefined ?? '',
+      symbol,
       side,
       type,
       quantity,
@@ -127,9 +266,9 @@ export class PickupRequestedOrdersUsecase {
   private async publishPlaced(order: OrderModel, vendorOrderId: string): Promise<void> {
     const symbol = (order.rawRequest?.symbol as string | undefined) ?? '';
     const payload: OrderPlacedPayload = {
-      accountExternalId: order.accountExternalId ?? String(order.accountId),
-      brokerage: 'kiwoom',
-      marketEnv: order.marketEnv === 'PRODUCTION' ? 'production' : 'mock',
+      accountExternalId: requireAccountExternalId(order),
+      brokerage: toEventBrokerage(order.brokerage),
+      marketEnv: toEventMarketEnv(order.marketEnv),
       externalOrderId: vendorOrderId,
       clientOrderId: order.clientOrderId,
       symbol,
@@ -161,9 +300,9 @@ export class PickupRequestedOrdersUsecase {
   ): Promise<void> {
     const symbol = (order.rawRequest?.symbol as string | undefined) ?? '';
     const payload: OrderFailedPayload = {
-      accountExternalId: order.accountExternalId ?? String(order.accountId),
-      brokerage: 'kiwoom',
-      marketEnv: order.marketEnv === 'PRODUCTION' ? 'production' : 'mock',
+      accountExternalId: requireAccountExternalId(order),
+      brokerage: toEventBrokerage(order.brokerage),
+      marketEnv: toEventMarketEnv(order.marketEnv),
       clientOrderId: order.clientOrderId,
       symbol,
       reason,
@@ -184,4 +323,77 @@ export class PickupRequestedOrdersUsecase {
       ),
     );
   }
+
+  private async withDistributedAccountLock(
+    accountId: number,
+    run: () => Promise<void>,
+  ): Promise<void> {
+    if (!this.redis) {
+      await run();
+
+      return;
+    }
+
+    const key = `executor:order-lock:account:${accountId}`;
+    const owner = randomUUID();
+    const deadline = Date.now() + ACCOUNT_LOCK_WAIT_MS;
+
+    while (true) {
+      const acquired = await this.redis.set(key, owner, 'PX', ACCOUNT_LOCK_TTL_MS, 'NX');
+      if (acquired === 'OK') break;
+
+      if (Date.now() >= deadline) {
+        throw new DomainError(
+          `timed out waiting for executor account lock accountId=${accountId}`,
+          'EXECUTOR_ACCOUNT_LOCK_TIMEOUT',
+          { accountId, waitMs: ACCOUNT_LOCK_WAIT_MS },
+        );
+      }
+
+      await sleep(ACCOUNT_LOCK_POLL_MS);
+    }
+
+    try {
+      await run();
+    } finally {
+      await this.redis.eval(RELEASE_LOCK_SCRIPT, 1, key, owner).catch((err) => {
+        this.logger.warn(
+          `executor account lock release failed accountId=${accountId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      });
+    }
+  }
+}
+
+function toEventBrokerage(value: OrderModel['brokerage']): 'kiwoom' {
+  return value === 'KIWOOM' ? 'kiwoom' : 'kiwoom';
+}
+
+function toEventMarketEnv(value: OrderModel['marketEnv']): 'mock' | 'production' {
+  return value === 'PRODUCTION' ? 'production' : 'mock';
+}
+
+function requireAccountExternalId(order: OrderModel): string {
+  const accountExternalId = order.accountExternalId?.trim();
+  if (!accountExternalId) {
+    throw new DomainError(
+      'order is missing accountExternalId; refusing to publish internal account id',
+      'ORDER_ACCOUNT_EXTERNAL_ID_MISSING',
+      { orderId: order.id, accountId: order.accountId },
+    );
+  }
+
+  return accountExternalId;
+}
+
+function readPositiveInt(value: string | undefined, fallback: number): number {
+  const parsed = Number(value);
+
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

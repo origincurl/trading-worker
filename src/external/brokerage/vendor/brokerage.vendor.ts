@@ -125,6 +125,15 @@ export interface BrokerageVendor {
   // CredentialSourceService. accountExternalId stays on the payload
   // because vendor APIs take the external string.
   placeOrderForAccount(accountId: number, input: PlaceOrderInput): Promise<OrderAckModel>;
+  // Uses the api credential stamped on the order row at creation time.
+  // This avoids auth/body drift if account credential assignment changes
+  // between BE order creation and executor pickup.
+  placeOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    input: PlaceOrderInput,
+  ): Promise<OrderAckModel>;
   cancelOrder(input: CancelOrderInput): Promise<OrderAckModel>;
   // Phase J pair to placeOrderForAccount: cancellation pickup resolves
   // credentials through CredentialSourceService against the order's
@@ -133,6 +142,12 @@ export interface BrokerageVendor {
   // because vendor APIs take the external string, not the internal PK.
   cancelOrderForAccount(
     accountId: number,
+    accountExternalId: string,
+    externalOrderId: string,
+  ): Promise<OrderAckModel>;
+  cancelOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
     accountExternalId: string,
     externalOrderId: string,
   ): Promise<OrderAckModel>;

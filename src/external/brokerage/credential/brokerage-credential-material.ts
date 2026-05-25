@@ -11,6 +11,7 @@ export interface BrokerageCredentialMaterial {
   readonly credentialId: number;
   readonly brokerage: Brokerage;
   readonly marketEnv: MarketEnv;
+  readonly accountExternalId?: string | null;
   readonly appKey: string;
   readonly appSecret: string;
   readonly wsMaxSymbols?: number | null;

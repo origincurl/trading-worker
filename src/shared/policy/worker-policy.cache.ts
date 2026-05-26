@@ -118,7 +118,18 @@ export class WorkerPolicyCache implements OnApplicationBootstrap, OnModuleDestro
     if (raw === undefined) return defaultValue;
 
     try {
-      return JSON.parse(raw) as T;
+      const parsed = JSON.parse(raw) as unknown;
+
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'value' in parsed &&
+        typeof defaultValue !== 'object'
+      ) {
+        return (parsed as { value: T }).value;
+      }
+
+      return parsed as T;
     } catch (err) {
       this.logger.warn(
         `policy key=${key} valueJson is not valid JSON, falling back to default: ${

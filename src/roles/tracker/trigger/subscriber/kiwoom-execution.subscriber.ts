@@ -351,6 +351,12 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
 
     await client.send({ trnm: 'LOGIN', token });
     await ack;
+    await client.send({
+      trnm: 'REG',
+      grp_no: '1',
+      refresh: '1',
+      data: [{ item: [''], type: ['00'] }],
+    });
   }
 
   private connectionKey(item: TrackerWsLeaseSnapshot): string {

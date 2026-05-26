@@ -37,6 +37,12 @@ export class AccountPositionScheduler implements OnModuleInit {
     this.registry.addInterval(SCHEDULER_NAME, handle);
 
     this.logger.log(`scheduler ${SCHEDULER_NAME} every ${sec}s`);
+
+    this.tick().catch((err) =>
+      this.logger.warn(
+        `account-position initial sync error: ${err instanceof Error ? err.message : err}`,
+      ),
+    );
   }
 
   private async tick(): Promise<void> {

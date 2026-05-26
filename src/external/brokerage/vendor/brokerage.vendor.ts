@@ -32,6 +32,7 @@ export interface CancelOrderInput {
 export interface ModifyOrderInput {
   readonly accountId: string;
   readonly vendorOrderId: string;
+  readonly symbol?: string;
   readonly quantity?: number;
   readonly price?: number;
 }
@@ -144,12 +145,16 @@ export interface BrokerageVendor {
     accountId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel>;
   cancelOrderForAccountCredential(
     accountId: number,
     apiCredentialId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel>;
   modifyOrder(input: ModifyOrderInput): Promise<OrderAckModel>;
   modifyOrderForAccount(accountId: number, input: ModifyOrderInput): Promise<OrderAckModel>;

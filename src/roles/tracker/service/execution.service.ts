@@ -11,9 +11,16 @@ import {
   type OrderFilledPayload,
 } from '@shared/event/order-filled.event';
 import { ExecutionPersistenceService } from './execution-persistence.service';
+import { AccountBalanceService } from './account-balance.service';
+import { AccountPositionService } from './account-position.service';
+import { TrackerTargetService } from './tracker-target.service';
 
 const ACCOUNT_FILL_EVENT_TYPE = 'account.fill';
 const ACCOUNT_FILL_SCHEMA_VERSION = 1;
+const SNAPSHOT_REFRESH_DEBOUNCE_MS = readPositiveInt(
+  process.env.TRACKER_ACCOUNT_SNAPSHOT_REFRESH_DEBOUNCE_MS,
+  2000,
+);
 
 export interface IngestFillOutcome {
   readonly inserted: boolean;
@@ -35,8 +42,13 @@ export interface PublishOutboxOutcome {
 export class ExecutionService {
   private readonly logger = new Logger(ExecutionService.name);
 
+  private readonly snapshotRefreshTimers = new Map<string, NodeJS.Timeout>();
+
   constructor(
     private readonly persistence: ExecutionPersistenceService,
+    private readonly targets: TrackerTargetService,
+    private readonly balanceService: AccountBalanceService,
+    private readonly positionService: AccountPositionService,
     @Inject(BUS_PUBLISHER) private readonly publisher: BusPublisher,
     @Inject(BUS_STREAMS) private readonly streams: BusStreams,
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
@@ -68,6 +80,8 @@ export class ExecutionService {
         this.produceFillStream(payload, outcome.externalFillId),
       ]);
     }
+
+    this.scheduleAccountSnapshotRefresh(payload.accountId);
 
     return { inserted: true, anomaly: outcome.anomaly };
   }
@@ -158,4 +172,45 @@ export class ExecutionService {
       throw err;
     }
   }
+
+  private scheduleAccountSnapshotRefresh(accountExternalId: string): void {
+    if (this.snapshotRefreshTimers.has(accountExternalId)) return;
+
+    const timer = setTimeout(() => {
+      this.snapshotRefreshTimers.delete(accountExternalId);
+
+      this.refreshAccountSnapshot(accountExternalId).catch((err) =>
+        this.logger.warn(
+          `account snapshot refresh after fill failed account=${accountExternalId}: ${
+            err instanceof Error ? err.message : err
+          }`,
+        ),
+      );
+    }, SNAPSHOT_REFRESH_DEBOUNCE_MS);
+
+    this.snapshotRefreshTimers.set(accountExternalId, timer);
+  }
+
+  private async refreshAccountSnapshot(accountExternalId: string): Promise<void> {
+    const target = await this.targets.findShardedTargetByExternalId(accountExternalId);
+
+    if (!target) {
+      this.logger.warn(`account snapshot refresh target not found account=${accountExternalId}`);
+
+      return;
+    }
+
+    await Promise.allSettled([
+      this.balanceService.syncOne(target),
+      this.positionService.syncOne(target),
+    ]);
+  }
+}
+
+function readPositiveInt(value: string | undefined, fallback: number): number {
+  if (!value) return fallback;
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }

@@ -80,6 +80,14 @@ export class TrackerTargetService {
     );
   }
 
+  async findShardedTargetByExternalId(
+    accountExternalId: string,
+  ): Promise<TrackerAccountTarget | null> {
+    const targets = await this.shardedTargets();
+
+    return targets.find((target) => target.accountExternalId === accountExternalId) ?? null;
+  }
+
   async activeCredentialTargets(): Promise<TrackerAccountTarget[]> {
     const accounts = await this.accountRepo.findActiveAccounts();
     const byCredentialId = new Map<number, TrackerAccountTarget>();

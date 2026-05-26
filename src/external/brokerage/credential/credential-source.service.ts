@@ -84,7 +84,7 @@ export class CredentialSourceService {
     const evaluated = all.map((credential) => ({
       credential,
       exclusionReason: this.collectorExclusionReason(credential.id, limitState, now, endpoint),
-      priority: this.collectorPriority(credential.id, limitState, endpoint),
+      priority: this.collectorPriority(credential.id, limitState, endpoint, now),
     }));
     const eligibleItems = evaluated.filter((item) => item.exclusionReason === null);
     const bestPriority = Math.min(...eligibleItems.map((item) => item.priority));
@@ -174,11 +174,22 @@ export class CredentialSourceService {
     credentialId: number,
     limitState: Awaited<ReturnType<CollectorCredentialLimitRepository['findByCredentialIds']>>,
     endpoint: 'REST' | 'WS',
+    now: number,
   ): number {
     const state = limitState.states.get(credentialId);
     if (!state) return 0;
     const status = endpoint === 'REST' ? state.restStatus : state.wsStatus;
     if (status === CollectorCredentialRuntimeStatus.Active) return 0;
+    const cooldownUntil = endpoint === 'REST' ? state.restCooldownUntil : state.wsCooldownUntil;
+    if (
+      cooldownUntil &&
+      cooldownUntil.getTime() <= now &&
+      (status === CollectorCredentialRuntimeStatus.RateLimited ||
+        status === CollectorCredentialRuntimeStatus.Cooldown ||
+        status === CollectorCredentialRuntimeStatus.WsLimited)
+    ) {
+      return 0;
+    }
 
     return 1;
   }

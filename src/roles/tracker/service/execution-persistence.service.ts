@@ -628,31 +628,34 @@ async function applyPositionBookFill(
 ): Promise<string | null> {
   const order = input.order;
   const sourceType: 'STRATEGY' | 'MANUAL' = order.accountStrategyId ? 'STRATEGY' : 'MANUAL';
+  const accountStockLockKey = ['position-book', order.accountId, order.stockId, 'all'].join(':');
   const lockKey = [
     'position-book',
     order.accountId,
     order.stockId,
     sourceType,
-    sourceType === 'STRATEGY' ? order.accountStrategyId : (order.requestedByUserId ?? 'account'),
+    sourceType === 'STRATEGY' ? order.accountStrategyId : 'account',
   ].join(':');
 
+  await repo.query('SELECT pg_advisory_xact_lock(hashtext($1))', [accountStockLockKey]);
   await repo.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
 
-  const where =
+  const existing =
     sourceType === 'STRATEGY'
-      ? {
+      ? await repo.findOne({
+          where: {
+            accountId: order.accountId,
+            stockId: order.stockId,
+            sourceType,
+            accountStrategyId: order.accountStrategyId,
+          } as Record<string, unknown>,
+        })
+      : await findManualPositionBook(repo, {
           accountId: order.accountId,
           stockId: order.stockId,
-          sourceType,
-          accountStrategyId: order.accountStrategyId,
-        }
-      : {
-          accountId: order.accountId,
-          stockId: order.stockId,
-          sourceType,
           requestedByUserId: order.requestedByUserId,
-        };
-  const existing = await repo.findOne({ where: where as Record<string, unknown> });
+          side: input.payload.side,
+        });
   if (!existing && input.payload.side === 'sell') {
     return 'position-book-missing-sell';
   }
@@ -702,6 +705,41 @@ async function applyPositionBookFill(
     lastFillId: input.fillId,
     lastFilledAt: input.filledAt,
   } as Record<string, unknown>);
+
+  return null;
+}
+
+async function findManualPositionBook(
+  repo: Repository<PositionBookEntity>,
+  input: {
+    accountId: number;
+    stockId: number;
+    requestedByUserId: number | null;
+    side: 'buy' | 'sell';
+  },
+): Promise<PositionBookEntity | null> {
+  if (input.requestedByUserId !== null) {
+    const userBook = await repo.findOne({
+      where: {
+        accountId: input.accountId,
+        stockId: input.stockId,
+        sourceType: 'MANUAL',
+        requestedByUserId: input.requestedByUserId,
+      } as Record<string, unknown>,
+    });
+    if (userBook) return userBook;
+  }
+
+  if (input.side === 'sell') {
+    return await repo.findOne({
+      where: {
+        accountId: input.accountId,
+        stockId: input.stockId,
+        sourceType: 'MANUAL',
+        requestedByUserId: null,
+      } as Record<string, unknown>,
+    });
+  }
 
   return null;
 }

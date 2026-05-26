@@ -10,6 +10,9 @@ export interface UpsertPositionInput {
   readonly quantity: number;
   readonly lockedQuantity: number | null;
   readonly averagePrice: number;
+  readonly currentPrice: number | null;
+  readonly marketValue: number | null;
+  readonly unrealizedPnl: number | null;
   readonly syncedAt: Date;
 }
 

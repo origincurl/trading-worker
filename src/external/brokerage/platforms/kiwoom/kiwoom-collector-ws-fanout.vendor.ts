@@ -53,6 +53,7 @@ type Child = {
 };
 
 const CONNECT_FAILURE_BACKOFF_MS = 5 * 60_000;
+const DEFAULT_WS_MAX_SYMBOLS = 100;
 const DEFAULT_MARKET_INDEX_SYMBOLS = Object.values(MARKET_INDEX_CODES);
 const MARKET_INDEX_SYMBOLS = new Set(DEFAULT_MARKET_INDEX_SYMBOLS);
 
@@ -134,8 +135,16 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     accountId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel> {
-    return this.opts.delegate.cancelOrderForAccount(accountId, accountExternalId, externalOrderId);
+    return this.opts.delegate.cancelOrderForAccount(
+      accountId,
+      accountExternalId,
+      externalOrderId,
+      symbol,
+      quantity,
+    );
   }
 
   cancelOrderForAccountCredential(
@@ -143,12 +152,16 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     apiCredentialId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel> {
     return this.opts.delegate.cancelOrderForAccountCredential(
       accountId,
       apiCredentialId,
       accountExternalId,
       externalOrderId,
+      symbol,
+      quantity,
     );
   }
 
@@ -383,7 +396,7 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
         credentialId: material.credentialId,
         vendor,
         symbols: new Set(),
-        wsMaxSymbols: material.wsMaxSymbols ?? null,
+        wsMaxSymbols: material.wsMaxSymbols ?? DEFAULT_WS_MAX_SYMBOLS,
       });
       this.logger.log(`collector WS fanout added credentialId=${material.credentialId}`);
     }

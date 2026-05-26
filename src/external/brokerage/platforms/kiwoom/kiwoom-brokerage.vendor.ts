@@ -213,12 +213,17 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         },
       });
 
+      const cash = parseNumberOr0(response.entr);
+
       return {
-        accountId: response.acntNo,
-        currency: response.crncyCd,
-        cash: parseNumberOr0(response.cshAmt),
-        buyingPower: parseNumberOr0(response.buyPwr),
-        equityValue: parseNumberOr0(response.evlAmt),
+        accountId: response.acntNo ?? input.accountId,
+        currency: 'KRW',
+        cash,
+        buyingPower: parseNumberOr0(response.ord_alow_amt ?? response.pymn_alow_amt),
+        // kt00001 is a deposit detail API. It does not include mark-to-market
+        // portfolio value, so persist cash here and let API composition add the
+        // latest position snapshot for the trading summary.
+        equityValue: cash,
         snapshotAt: new Date().toISOString(),
       };
     } catch (err) {
@@ -276,13 +281,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
       const snapshotAt = new Date().toISOString();
 
-      return (response.pstnLst ?? []).map((row) => ({
-        accountId: response.acntNo,
-        symbol: row.stkCd,
-        quantity: parseNumberOr0(row.qty),
-        averagePrice: parseNumberOr0(row.avgPrc),
-        marketValue: parseNumberOr0(row.mktVal),
-        unrealizedPnl: parseNumberOr0(row.urlzPnl),
+      const rows = response.pstnLst ?? response.acnt_evlt_remn_indv_tot ?? [];
+
+      return rows.map((row) => ({
+        accountId: response.acntNo ?? input.accountId,
+        symbol: normalizeKiwoomSymbol(row.stkCd ?? row.stk_cd ?? ''),
+        quantity: parseNumberOr0(row.qty ?? row.rmnd_qty),
+        averagePrice: parseNumberOr0(row.avgPrc ?? row.pur_pric),
+        marketValue: parseNumberOr0(row.mktVal ?? row.evlt_amt),
+        unrealizedPnl: parseNumberOr0(row.urlzPnl ?? row.evltv_prft),
         snapshotAt,
       }));
     } catch (err) {
@@ -341,6 +348,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     accountId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrderForAccount');
 
@@ -349,6 +358,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     return this.executeCancelOrder(
       accountExternalId,
       externalOrderId,
+      symbol,
+      quantity,
       this.accountTokenSupplier(accountId),
     );
   }
@@ -358,12 +369,16 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     apiCredentialId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrderForAccountCredential');
 
     return this.executeCancelOrder(
       accountExternalId,
       externalOrderId,
+      symbol,
+      quantity,
       this.accountCredentialTokenSupplier(accountId, apiCredentialId, accountExternalId),
     );
   }
@@ -805,25 +820,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   ): Promise<OrderAckModel> {
     try {
       const apiId = input.side === 'buy' ? APIID_PLACE_BUY : APIID_PLACE_SELL;
-      // ordTp: 00 = 지정가 (limit), 03 = 시장가 (market).
-      // TODO(kiwoom-spec): confirm exact ordTp codes against Kiwoom REST
-      // — '00'/'03' are the historical TR convention but REST may differ.
-      const ordTp = input.type === 'limit' ? '00' : '03';
-      // ordSide on the request contract is required by the contract type;
-      // Kiwoom historically encodes buy/sell via the apiId itself (split
-      // BUY/SELL apiIds), but we keep the wire field populated to satisfy
-      // the contract and any future-unified endpoint.
-      // TODO(kiwoom-spec): confirm '2'=buy / '1'=sell mapping; some
-      // Kiwoom TR docs invert these.
-      const ordSide = input.side === 'buy' ? '2' : '1';
 
       const body: PlaceOrderRequestContract = {
         acntNo: input.accountId, // external string per PlaceOrderInput doc
-        stkCd: input.symbol,
-        ordTp,
-        ordSide,
-        qty: input.quantity,
-        prc: input.price,
+        stk_cd: input.symbol,
+        dmst_stex_tp: 'KRX',
+        ord_qty: String(input.quantity),
+        ord_uv: input.type === 'market' ? '' : String(input.price ?? 0),
+        trde_tp: input.type === 'market' ? '3' : '0',
+        cond_uv: '',
         clOrdId: input.clientOrderId,
       };
 
@@ -843,7 +848,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         },
       });
 
-      return mapOrderResponseToAck(response, 'accepted');
+      return mapOrderResponseToAck(response, 'accepted', input);
     } catch (err) {
       throw this.wrapVendorError(err, 'placeOrder', {
         clientOrderId: input.clientOrderId,
@@ -854,12 +859,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private async executeCancelOrder(
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<OrderAckModel> {
     try {
       const body: CancelOrderRequestContract = {
         acntNo: accountExternalId,
-        ordNo: externalOrderId,
+        orig_ord_no: externalOrderId,
+        stk_cd: symbol ?? '',
+        // Kiwoom documents `0` as "cancel all remaining quantity". Worker
+        // cancel flows are full-cancel only, so avoid stale remainingQuantity
+        // creating a wire-level quantity mismatch.
+        cncl_qty: '0',
+        dmst_stex_tp: 'KRX',
       };
 
       const response = await this.opts.apiClient.request<
@@ -892,11 +905,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<OrderAckModel> {
     try {
+      if (!input.symbol) {
+        throw new DomainError('modifyOrder requires symbol for Kiwoom kt10002', 'SYMBOL_REQUIRED', {
+          vendorOrderId: input.vendorOrderId,
+        });
+      }
+
       const body: ModifyOrderRequestContract = {
         acntNo: input.accountId,
-        ordNo: input.vendorOrderId,
-        qty: input.quantity,
-        prc: input.price,
+        orig_ord_no: input.vendorOrderId,
+        stk_cd: input.symbol,
+        dmst_stex_tp: 'KRX',
+        mdfy_qty: String(input.quantity ?? 0),
+        mdfy_uv: String(input.price ?? 0),
+        mdfy_cond_uv: '',
       };
 
       const response = await this.opts.apiClient.request<
@@ -1357,6 +1379,12 @@ function parseNumberOr0(input: string | number | undefined | null): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+function normalizeKiwoomSymbol(value: string): string {
+  const trimmed = value.trim();
+
+  return trimmed.startsWith('A') ? trimmed.slice(1) : trimmed;
+}
+
 function parseKiwoomPriceOrNull(value: unknown): number | null {
   // Kiwoom REST chart fields encode previous-day direction in the sign
   // bit (`-274000` means price 274000, down vs previous day). KRX stock
@@ -1525,23 +1553,26 @@ function stripKiwoomVenueSuffix(symbol: string): string {
 function mapOrderResponseToAck(
   response: PlaceOrderResponseContract | CancelOrderResponseContract | ModifyOrderResponseContract,
   status: OrderAckModel['status'],
+  input?: PlaceOrderInput | ModifyOrderInput,
 ): OrderAckModel {
-  const side: OrderSide = response.ordSide === '2' ? 'buy' : 'sell';
+  const side: OrderSide =
+    'side' in (input ?? {}) ? (input as PlaceOrderInput).side : response.ordSide === '2' ? 'buy' : 'sell';
   // ordTp '00'=limit, '03'=market — matches encoding in executePlaceOrder.
   // TODO(kiwoom-spec): keep in sync with the encoder above when the real
   // ordTp catalogue is confirmed.
-  const type: OrderType = response.ordTp === '03' ? 'market' : 'limit';
+  const type: OrderType =
+    'type' in (input ?? {}) ? (input as PlaceOrderInput).type : response.ordTp === '03' ? 'market' : 'limit';
 
   return {
-    vendorOrderId: response.ordNo,
-    clientOrderId: response.clOrdId,
-    accountId: response.acntNo,
-    symbol: response.stkCd,
+    vendorOrderId: response.ordNo ?? ('ord_no' in response ? response.ord_no : undefined) ?? '',
+    clientOrderId: response.clOrdId ?? ('clientOrderId' in (input ?? {}) ? (input as PlaceOrderInput).clientOrderId : ''),
+    accountId: response.acntNo ?? input?.accountId ?? '',
+    symbol: response.stkCd ?? ('stk_cd' in response ? response.stk_cd : undefined) ?? ('symbol' in (input ?? {}) ? (input as PlaceOrderInput).symbol : ''),
     side,
     type,
-    quantity: parseNumberOr0(response.qty),
-    price: response.prc !== undefined ? parseNumberOr0(response.prc) : undefined,
+    quantity: response.qty !== undefined ? parseNumberOr0(response.qty) : 'quantity' in (input ?? {}) ? (input as PlaceOrderInput | ModifyOrderInput).quantity ?? 0 : 0,
+    price: response.prc !== undefined ? parseNumberOr0(response.prc) : 'price' in (input ?? {}) ? (input as PlaceOrderInput | ModifyOrderInput).price : undefined,
     status,
-    acceptedAt: response.acceptedAt,
+    acceptedAt: response.acceptedAt ?? new Date().toISOString(),
   };
 }

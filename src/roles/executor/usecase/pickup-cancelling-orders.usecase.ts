@@ -142,6 +142,8 @@ export class PickupCancellingOrdersUsecase {
       apiCredentialId,
       accountExternalId,
       externalOrderId,
+      typeof order.rawRequest?.symbol === 'string' ? order.rawRequest.symbol.trim() : undefined,
+      Number(order.remainingQuantity ?? order.quantity),
     );
 
     // Vendor ack received. We only close the cancellation claim we own.

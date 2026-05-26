@@ -1,7 +1,10 @@
 import { Logger } from '@nestjs/common';
 import { DomainError, IntegrationError, NotImplementedError } from '@common/error/domain.error';
 import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
-import type { MarketCandleClosedPayload } from '@shared/event/market-candle-closed.event';
+import type {
+  CandleChartMarket,
+  MarketCandleClosedPayload,
+} from '@shared/event/market-candle-closed.event';
 import {
   MARKET_INDEX_CODES,
   MARKET_INDEX_NAMES,
@@ -70,6 +73,11 @@ export interface KiwoomBrokerageVendorOptions {
   // without needing a back-reference into the token service singleton.
   readonly tokenSupplier: KiwoomTokenSupplier;
   readonly accountTokenSupplier?: (accountId: number) => Promise<KiwoomTokenResult>;
+  readonly accountCredentialTokenSupplier?: (
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ) => Promise<KiwoomTokenResult>;
   readonly usage?: CredentialUsageService;
   readonly collectorRuntimeState?: CollectorCredentialLimitRepository;
   // Used by AccessTokenCacheService.invalidate when LOGIN keeps failing.
@@ -142,6 +150,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   private activeWsCredential: CredentialUsageContext | null = null;
 
+  private lastSystemCloseReason: string | null = null;
+
   constructor(private readonly opts: KiwoomBrokerageVendorOptions) {
     this.logger = new Logger(`KiwoomBrokerageVendor[${opts.profile}]`);
   }
@@ -182,7 +192,10 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<AccountBalanceModel> {
     try {
-      const body: GetAccountBalanceRequestContract = { acntNo: input.accountId };
+      const body: GetAccountBalanceRequestContract = {
+        acntNo: input.accountId,
+        qry_tp: '1',
+      };
 
       const response = await this.opts.apiClient.request<
         GetAccountBalanceRequestContract,
@@ -192,14 +205,25 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ACCOUNT,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'TRACKER_ACCOUNT',
+          priority: 'P3',
+          actionType: 'ACCOUNT_SYNC',
+          endpointType: 'REST_ACCOUNT',
+        },
       });
 
+      const cash = parseNumberOr0(response.entr);
+
       return {
-        accountId: response.acntNo,
-        currency: response.crncyCd,
-        cash: parseNumberOr0(response.cshAmt),
-        buyingPower: parseNumberOr0(response.buyPwr),
-        equityValue: parseNumberOr0(response.evlAmt),
+        accountId: response.acntNo ?? input.accountId,
+        currency: 'KRW',
+        cash,
+        buyingPower: parseNumberOr0(response.ord_alow_amt ?? response.pymn_alow_amt),
+        // kt00001 is a deposit detail API. It does not include mark-to-market
+        // portfolio value, so persist cash here and let API composition add the
+        // latest position snapshot for the trading summary.
+        equityValue: cash,
         snapshotAt: new Date().toISOString(),
       };
     } catch (err) {
@@ -231,7 +255,13 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<PositionModel[]> {
     try {
-      const body: GetPositionsRequestContract = { acntNo: input.accountId };
+      const body: GetPositionsRequestContract = {
+        acntNo: input.accountId,
+        qry_tp: '1',
+        // Phase 1 is KRX-only for account positions. Switch this policy to
+        // SOR or venue-aware lookup when NXT/SOR account handling is enabled.
+        dmst_stex_tp: 'KRX',
+      };
 
       const response = await this.opts.apiClient.request<
         GetPositionsRequestContract,
@@ -241,17 +271,25 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ACCOUNT,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'TRACKER_ACCOUNT',
+          priority: 'P3',
+          actionType: 'ACCOUNT_SYNC',
+          endpointType: 'REST_ACCOUNT',
+        },
       });
 
       const snapshotAt = new Date().toISOString();
 
-      return (response.pstnLst ?? []).map((row) => ({
-        accountId: response.acntNo,
-        symbol: row.stkCd,
-        quantity: parseNumberOr0(row.qty),
-        averagePrice: parseNumberOr0(row.avgPrc),
-        marketValue: parseNumberOr0(row.mktVal),
-        unrealizedPnl: parseNumberOr0(row.urlzPnl),
+      const rows = response.pstnLst ?? response.acnt_evlt_remn_indv_tot ?? [];
+
+      return rows.map((row) => ({
+        accountId: response.acntNo ?? input.accountId,
+        symbol: normalizeKiwoomSymbol(row.stkCd ?? row.stk_cd ?? ''),
+        quantity: parseNumberOr0(row.qty ?? row.rmnd_qty),
+        averagePrice: parseNumberOr0(row.avgPrc ?? row.pur_pric),
+        marketValue: parseNumberOr0(row.mktVal ?? row.evlt_amt),
+        unrealizedPnl: parseNumberOr0(row.urlzPnl ?? row.evltv_prft),
         snapshotAt,
       }));
     } catch (err) {
@@ -282,6 +320,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     return this.executePlaceOrder(input, this.accountTokenSupplier(accountId));
   }
 
+  async placeOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    input: PlaceOrderInput,
+  ): Promise<OrderAckModel> {
+    this.assertProfile('executor', 'placeOrderForAccountCredential');
+
+    return this.executePlaceOrder(
+      input,
+      this.accountCredentialTokenSupplier(accountId, apiCredentialId, accountExternalId),
+    );
+  }
+
   async cancelOrder(input: CancelOrderInput): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrder');
 
@@ -296,6 +348,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     accountId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel> {
     this.assertProfile('executor', 'cancelOrderForAccount');
 
@@ -304,7 +358,28 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     return this.executeCancelOrder(
       accountExternalId,
       externalOrderId,
+      symbol,
+      quantity,
       this.accountTokenSupplier(accountId),
+    );
+  }
+
+  async cancelOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
+  ): Promise<OrderAckModel> {
+    this.assertProfile('executor', 'cancelOrderForAccountCredential');
+
+    return this.executeCancelOrder(
+      accountExternalId,
+      externalOrderId,
+      symbol,
+      quantity,
+      this.accountCredentialTokenSupplier(accountId, apiCredentialId, accountExternalId),
     );
   }
 
@@ -326,17 +401,19 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
   async fetchChartCandles(input: FetchChartCandlesInput): Promise<MarketCandleClosedPayload[]> {
     try {
-      const baseDt = toYyyyMmDd(input.toIso);
+      const baseDt = input.baseDt ?? toYyyyMmDd(input.toIso);
       const isMinute = input.intervalType === '1m';
       const apiId = isMinute ? APIID_CHART_MINUTE : APIID_CHART_DAILY;
+      const chartMarket = input.chartMarket ?? (input.marketEnv === 'production' ? 'AL' : 'KRW');
+      const requestSymbol = toKiwoomChartSymbol(input.symbol, chartMarket);
       const body: FetchChartCandlesRequestContract = isMinute
         ? {
-            stk_cd: input.symbol,
+            stk_cd: requestSymbol,
             base_dt: baseDt,
             tic_scope: '1' /* 1분봉 */,
             upd_stkpc_tp: '1' /* 수정주가반영 */,
           }
-        : { stk_cd: input.symbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
+        : { stk_cd: requestSymbol, base_dt: baseDt, upd_stkpc_tp: '1' /* 수정주가반영 */ };
 
       const response = await this.opts.apiClient.request<
         FetchChartCandlesRequestContract,
@@ -345,14 +422,31 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         apiId,
         endpointPath: PATH_CHART,
         body,
+        usage: {
+          origin: 'COLLECTOR_MARKET',
+          priority: 'P2',
+          actionType: 'MARKET_DATA',
+          endpointType: 'REST_CHART',
+        },
+        meta: {
+          requestId: input.requestId,
+          symbol: input.symbol,
+          intervalType: input.intervalType,
+          chartMarket,
+          baseDt,
+          fromIso: input.fromIso,
+          toIso: input.toIso,
+          acceptFromIso: input.acceptFromIso,
+          acceptToIso: input.acceptToIso,
+        },
       });
 
       const rows = isMinute
         ? (response.stk_min_pole_chart_qry ?? [])
         : (response.stk_dt_pole_chart_qry ?? []);
 
-      const fromMs = Date.parse(input.fromIso);
-      const toMs = Date.parse(input.toIso);
+      const fromMs = Date.parse(input.acceptFromIso ?? input.fromIso);
+      const toMs = Date.parse(input.acceptToIso ?? input.toIso);
       const intervalMs = isMinute ? 60_000 : 24 * 3_600_000;
       const out: MarketCandleClosedPayload[] = [];
 
@@ -388,7 +482,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           symbol: input.symbol,
           market: 'unknown',
           chartSource: 'broker_chart_REST',
-          chartMarket: input.chartMarket ?? 'KRW',
+          chartMarket,
           intervalType: '1m',
           bucketStart,
           bucketEnd,
@@ -444,6 +538,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
             apiId: APIID_STOCK_MASTER,
             endpointPath: PATH_STOCK_INFO,
             body: { mrkt_tp: mrktTp },
+            usage: {
+              origin: 'COLLECTOR_MARKET',
+              priority: 'P2',
+              actionType: 'MARKET_DATA',
+              endpointType: 'REST_MARKET_STATS',
+            },
           });
 
           const rows: ReadonlyArray<KiwoomStockMasterRowContract> =
@@ -506,6 +606,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           apiId: APIID_INDEX_CURRENT,
           endpointPath: PATH_SECTOR,
           body: { inds_cd: indexCode, mrkt_tp: indexCode },
+          usage: {
+            origin: 'COLLECTOR_MARKET',
+            priority: 'P2',
+            actionType: 'MARKET_DATA',
+            endpointType: 'REST_MARKET_STATS',
+          },
         });
         const raw = normalizeIndexResponse(response, symbol);
 
@@ -540,12 +646,18 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
 
     this.loginHalted = false;
 
+    this.lastSystemCloseReason = null;
+
     this.opts.wsClient.onMessage((parsed) => this.routeFrame(parsed));
 
     this.opts.wsClient.onClose((code, reason) => {
       this.loggedIn = false;
       if (this.activeWsCredential) {
-        this.opts.usage?.markWsDisconnected(this.opts.profile, this.activeWsCredential);
+        this.opts.usage?.markWsDisconnected(
+          this.opts.profile,
+          this.activeWsCredential,
+          this.lastSystemCloseReason ?? undefined,
+        );
 
         this.activeWsCredential = null;
       }
@@ -591,6 +703,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     this.consecutiveLoginFailures = 0;
 
     this.loginHalted = false;
+
+    this.lastSystemCloseReason = null;
 
     await this.opts.wsClient.disconnect();
   }
@@ -706,25 +820,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   ): Promise<OrderAckModel> {
     try {
       const apiId = input.side === 'buy' ? APIID_PLACE_BUY : APIID_PLACE_SELL;
-      // ordTp: 00 = 지정가 (limit), 03 = 시장가 (market).
-      // TODO(kiwoom-spec): confirm exact ordTp codes against Kiwoom REST
-      // — '00'/'03' are the historical TR convention but REST may differ.
-      const ordTp = input.type === 'limit' ? '00' : '03';
-      // ordSide on the request contract is required by the contract type;
-      // Kiwoom historically encodes buy/sell via the apiId itself (split
-      // BUY/SELL apiIds), but we keep the wire field populated to satisfy
-      // the contract and any future-unified endpoint.
-      // TODO(kiwoom-spec): confirm '2'=buy / '1'=sell mapping; some
-      // Kiwoom TR docs invert these.
-      const ordSide = input.side === 'buy' ? '2' : '1';
 
       const body: PlaceOrderRequestContract = {
         acntNo: input.accountId, // external string per PlaceOrderInput doc
-        stkCd: input.symbol,
-        ordTp,
-        ordSide,
-        qty: input.quantity,
-        prc: input.price,
+        stk_cd: input.symbol,
+        dmst_stex_tp: 'KRX',
+        ord_qty: String(input.quantity),
+        ord_uv: input.type === 'market' ? '' : String(input.price ?? 0),
+        trde_tp: input.type === 'market' ? '3' : '0',
+        cond_uv: '',
         clOrdId: input.clientOrderId,
       };
 
@@ -736,9 +840,15 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'ORDER',
+          endpointType: 'REST_ORDER',
+        },
       });
 
-      return mapOrderResponseToAck(response, 'accepted');
+      return mapOrderResponseToAck(response, 'accepted', input);
     } catch (err) {
       throw this.wrapVendorError(err, 'placeOrder', {
         clientOrderId: input.clientOrderId,
@@ -749,12 +859,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private async executeCancelOrder(
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<OrderAckModel> {
     try {
       const body: CancelOrderRequestContract = {
         acntNo: accountExternalId,
-        ordNo: externalOrderId,
+        orig_ord_no: externalOrderId,
+        stk_cd: symbol ?? '',
+        // Kiwoom documents `0` as "cancel all remaining quantity". Worker
+        // cancel flows are full-cancel only, so avoid stale remainingQuantity
+        // creating a wire-level quantity mismatch.
+        cncl_qty: '0',
+        dmst_stex_tp: 'KRX',
       };
 
       const response = await this.opts.apiClient.request<
@@ -765,6 +883,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'CANCEL',
+          endpointType: 'REST_ORDER',
+        },
       });
 
       return mapOrderResponseToAck(response, 'cancelled');
@@ -781,11 +905,20 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     tokenSupplier?: KiwoomTokenSupplier,
   ): Promise<OrderAckModel> {
     try {
+      if (!input.symbol) {
+        throw new DomainError('modifyOrder requires symbol for Kiwoom kt10002', 'SYMBOL_REQUIRED', {
+          vendorOrderId: input.vendorOrderId,
+        });
+      }
+
       const body: ModifyOrderRequestContract = {
         acntNo: input.accountId,
-        ordNo: input.vendorOrderId,
-        qty: input.quantity,
-        prc: input.price,
+        orig_ord_no: input.vendorOrderId,
+        stk_cd: input.symbol,
+        dmst_stex_tp: 'KRX',
+        mdfy_qty: String(input.quantity ?? 0),
+        mdfy_uv: String(input.price ?? 0),
+        mdfy_cond_uv: '',
       };
 
       const response = await this.opts.apiClient.request<
@@ -796,6 +929,12 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         endpointPath: PATH_ORDER,
         body,
         tokenSupplier,
+        usage: {
+          origin: 'EXECUTOR_STRATEGY',
+          priority: 'P1',
+          actionType: 'MODIFY',
+          endpointType: 'REST_ORDER',
+        },
       });
 
       return mapOrderResponseToAck(response, 'accepted');
@@ -817,9 +956,31 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       return;
     }
 
+    if (trnm === 'SYSTEM' && isPlainObject(parsed)) {
+      void this.handleSystemFrame(parsed);
+
+      return;
+    }
+
     if (trnm === 'LOGIN' || trnm === 'REG' || trnm === 'REMOVE') return;
 
     this.frameHandler?.(parsed);
+  }
+
+  private async handleSystemFrame(parsed: Record<string, unknown>): Promise<void> {
+    const code = typeof parsed.code === 'string' ? parsed.code : null;
+    const message = typeof parsed.message === 'string' ? parsed.message : 'Kiwoom SYSTEM frame';
+
+    this.logger.warn(`SYSTEM code=${code ?? '<unknown>'} message="${message}"`);
+    this.lastSystemCloseReason = `Kiwoom SYSTEM ${code ?? '<unknown>'}: ${message}`;
+
+    if (code !== 'R10001') return;
+
+    // Kiwoom sends R10001 when another session uses the same AppKey, then closes
+    // this socket with code=1000/Bye. Reconnecting immediately just creates a
+    // session fight, so mark this credential limited and let fan-out redistribute.
+    this.loginHalted = true;
+    await this.recordWsLimited(new Error(`Kiwoom SYSTEM ${code}: ${message}`));
   }
 
   private installLoginAckGate(): Promise<void> {
@@ -877,6 +1038,24 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     return () => supplier(accountId);
   }
 
+  private accountCredentialTokenSupplier(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ): KiwoomTokenSupplier {
+    if (!this.opts.accountCredentialTokenSupplier) {
+      throw new DomainError(
+        'account credential token supplier is not configured',
+        'ACCOUNT_CREDENTIAL_TOKEN_SUPPLIER_MISSING',
+        { profile: this.opts.profile, accountId, apiCredentialId },
+      );
+    }
+
+    const supplier = this.opts.accountCredentialTokenSupplier;
+
+    return () => supplier(accountId, apiCredentialId, accountExternalId);
+  }
+
   private async performLogin(): Promise<void> {
     let tokenResult = normalizeTokenResult(await this.opts.tokenSupplier());
 
@@ -911,6 +1090,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     }
 
     this.activeWsCredential = tokenResult.credential;
+    this.lastSystemCloseReason = null;
     if (tokenResult.credential) {
       if (this.opts.profile === 'collector' && tokenResult.credential.kind === 'collector') {
         await this.opts.collectorRuntimeState?.markSuccess({
@@ -918,6 +1098,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           source: 'WS',
         });
       }
+      // Tracker execution WS must pass TRACKER_STATUS/WS overrides before it is enabled.
+      // The current active path is collector-only, where default COLLECTOR_MARKET is correct.
       this.opts.usage?.markWsConnected(
         this.opts.profile,
         tokenResult.credential,
@@ -1061,6 +1243,8 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
   private recordWsSymbolUsage(): void {
     if (!this.activeWsCredential) return;
 
+    // Tracker execution WS must pass origin/action overrides before it is enabled.
+    // The current active path is collector-only, where default COLLECTOR_MARKET is correct.
     this.opts.usage?.markWsSymbols(
       this.opts.profile,
       this.activeWsCredential,
@@ -1193,6 +1377,12 @@ function parseNumberOr0(input: string | number | undefined | null): number {
   const n = typeof input === 'number' ? input : parseFloat(input);
 
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeKiwoomSymbol(value: string): string {
+  const trimmed = value.trim();
+
+  return trimmed.startsWith('A') ? trimmed.slice(1) : trimmed;
 }
 
 function parseKiwoomPriceOrNull(value: unknown): number | null {
@@ -1345,26 +1535,44 @@ function parseKiwoomCandleTs(
   return Date.UTC(y, mo, d) - KST_OFFSET_MS;
 }
 
+function toKiwoomChartSymbol(symbol: string, chartMarket: CandleChartMarket): string {
+  if (chartMarket === 'AL') {
+    return symbol.endsWith('_AL') ? symbol : `${stripKiwoomVenueSuffix(symbol)}_AL`;
+  }
+  if (chartMarket === 'NXT') {
+    return symbol.endsWith('_NX') ? symbol : `${stripKiwoomVenueSuffix(symbol)}_NX`;
+  }
+
+  return stripKiwoomVenueSuffix(symbol);
+}
+
+function stripKiwoomVenueSuffix(symbol: string): string {
+  return symbol.replace(/_(AL|NX)$/u, '');
+}
+
 function mapOrderResponseToAck(
   response: PlaceOrderResponseContract | CancelOrderResponseContract | ModifyOrderResponseContract,
   status: OrderAckModel['status'],
+  input?: PlaceOrderInput | ModifyOrderInput,
 ): OrderAckModel {
-  const side: OrderSide = response.ordSide === '2' ? 'buy' : 'sell';
+  const side: OrderSide =
+    'side' in (input ?? {}) ? (input as PlaceOrderInput).side : response.ordSide === '2' ? 'buy' : 'sell';
   // ordTp '00'=limit, '03'=market — matches encoding in executePlaceOrder.
   // TODO(kiwoom-spec): keep in sync with the encoder above when the real
   // ordTp catalogue is confirmed.
-  const type: OrderType = response.ordTp === '03' ? 'market' : 'limit';
+  const type: OrderType =
+    'type' in (input ?? {}) ? (input as PlaceOrderInput).type : response.ordTp === '03' ? 'market' : 'limit';
 
   return {
-    vendorOrderId: response.ordNo,
-    clientOrderId: response.clOrdId,
-    accountId: response.acntNo,
-    symbol: response.stkCd,
+    vendorOrderId: response.ordNo ?? ('ord_no' in response ? response.ord_no : undefined) ?? '',
+    clientOrderId: response.clOrdId ?? ('clientOrderId' in (input ?? {}) ? (input as PlaceOrderInput).clientOrderId : ''),
+    accountId: response.acntNo ?? input?.accountId ?? '',
+    symbol: response.stkCd ?? ('stk_cd' in response ? response.stk_cd : undefined) ?? ('symbol' in (input ?? {}) ? (input as PlaceOrderInput).symbol : ''),
     side,
     type,
-    quantity: parseNumberOr0(response.qty),
-    price: response.prc !== undefined ? parseNumberOr0(response.prc) : undefined,
+    quantity: response.qty !== undefined ? parseNumberOr0(response.qty) : 'quantity' in (input ?? {}) ? (input as PlaceOrderInput | ModifyOrderInput).quantity ?? 0 : 0,
+    price: response.prc !== undefined ? parseNumberOr0(response.prc) : 'price' in (input ?? {}) ? (input as PlaceOrderInput | ModifyOrderInput).price : undefined,
     status,
-    acceptedAt: response.acceptedAt,
+    acceptedAt: response.acceptedAt ?? new Date().toISOString(),
   };
 }

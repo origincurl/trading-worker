@@ -1,10 +1,16 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { EXECUTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
+import type { PositionModel } from '@external/brokerage/model/account.model';
 import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
 import { BUS_PUBLISHER } from '@shared/bus/bus.token';
 import type { BusPublisher } from '@shared/bus/bus-publisher.interface';
 import { WorkerEventFactory } from '@shared/event/event-factory';
+import { PositionBookEntity } from '@shared/persistence/position-book/position-book.entity';
+import { STOCK_REPOSITORY } from '@shared/persistence/stock/stock.token';
+import type { StockRepository } from '@shared/persistence/stock/stock.repository';
 import {
   POSITION_REPOSITORY,
   type PositionRepository,
@@ -32,8 +38,11 @@ export class AccountPositionService {
   constructor(
     @Inject(EXECUTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(POSITION_REPOSITORY) private readonly repo: PositionRepository,
+    @Inject(STOCK_REPOSITORY) private readonly stockRepo: StockRepository,
     @Inject(BUS_PUBLISHER) private readonly publisher: BusPublisher,
     @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
+    @InjectRepository(PositionBookEntity)
+    private readonly positionBooks: Repository<PositionBookEntity>,
     private readonly eventFactory: WorkerEventFactory,
   ) {}
 
@@ -67,9 +76,16 @@ export class AccountPositionService {
           // Vendor model has no locked-quantity concept yet; leave null.
           lockedQuantity: null,
           averagePrice: position.averagePrice,
+          currentPrice:
+            position.quantity > 0 && position.marketValue > 0
+              ? position.marketValue / position.quantity
+              : null,
+          marketValue: position.marketValue,
+          unrealizedPnl: position.unrealizedPnl,
           syncedAt: now,
         })),
       );
+      await this.ensureManualPositionBooks(target, vendorPositions, now);
 
       this._syncCount += 1;
 
@@ -86,6 +102,51 @@ export class AccountPositionService {
       );
 
       return null;
+    }
+  }
+
+  private async ensureManualPositionBooks(
+    target: TrackerAccountTarget,
+    positions: readonly PositionModel[],
+    syncedAt: Date,
+  ): Promise<void> {
+    for (const position of positions) {
+      if (position.quantity <= 0) continue;
+
+      const stock = await this.stockRepo.findBySymbol(position.symbol);
+      if (!stock) {
+        this.logger.warn(
+          `manual position-book backfill skipped account=${target.accountExternalId} symbol=${position.symbol}: stock not found`,
+        );
+        continue;
+      }
+
+      await this.positionBooks.manager.transaction(async (manager) => {
+        await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          ['position-book', target.accountId, stock.id, 'all'].join(':'),
+        ]);
+
+        const existingCount = await manager.count(PositionBookEntity, {
+          where: { accountId: target.accountId, stockId: stock.id },
+        });
+        if (existingCount > 0) return;
+
+        const costAmount = position.quantity * position.averagePrice;
+        await manager.insert(PositionBookEntity, {
+          accountId: target.accountId,
+          stockId: stock.id,
+          sourceType: 'MANUAL',
+          accountStrategyId: null,
+          strategyId: null,
+          requestedByUserId: null,
+          quantity: String(position.quantity),
+          averagePrice: String(position.averagePrice),
+          costAmount: String(costAmount),
+          realizedAmount: '0',
+          lastFillId: null,
+          lastFilledAt: syncedAt,
+        } as Record<string, unknown>);
+      });
     }
   }
 

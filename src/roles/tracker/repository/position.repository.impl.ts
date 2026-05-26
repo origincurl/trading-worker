@@ -32,6 +32,9 @@ export class PositionRepositoryImpl implements PositionRepository {
         quantity: input.quantity,
         lockedQuantity: input.lockedQuantity,
         averagePrice: input.averagePrice,
+        currentPrice: input.currentPrice,
+        marketValue: input.marketValue,
+        unrealizedPnl: input.unrealizedPnl,
         syncedAt: input.syncedAt.toISOString(),
       }));
     }
@@ -57,6 +60,9 @@ export class PositionRepositoryImpl implements PositionRepository {
         quantity: input.quantity,
         lockedQuantity: input.lockedQuantity,
         averagePrice: input.averagePrice,
+        currentPrice: input.currentPrice,
+        marketValue: input.marketValue,
+        unrealizedPnl: input.unrealizedPnl,
         syncedAt: input.syncedAt,
       });
 

@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { shouldHandle } from '@common/util/shard';
+import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
 import { RUNTIME_CONFIG, type RuntimeConfig } from '@config/runtime.config';
 import { ACCOUNT_REPOSITORY } from '@shared/persistence/account/account.token';
 import type { AccountRepository } from '@shared/persistence/account/account.repository';
@@ -15,6 +16,8 @@ export interface TrackerAccountTarget {
   readonly accountExternalId: string;
   readonly brokerage: string;
   readonly marketEnv: 'mock' | 'production';
+  readonly accountCredentialId: number;
+  readonly apiCredentialId: number;
 }
 
 @Injectable()
@@ -23,6 +26,7 @@ export class TrackerTargetService {
 
   constructor(
     @Inject(RUNTIME_CONFIG) private readonly runtime: RuntimeConfig,
+    @Inject(KIWOOM_CONFIG) private readonly kiwoom: KiwoomConfig,
     @Inject(ACCOUNT_REPOSITORY) private readonly accountRepo: AccountRepository,
     @Inject(ACCOUNT_CREDENTIAL_REPOSITORY)
     private readonly accountCredentialRepo: AccountCredentialRepository,
@@ -37,6 +41,7 @@ export class TrackerTargetService {
   async shardedTargets(): Promise<TrackerAccountTarget[]> {
     const accounts = await this.accountRepo.findActiveAccounts();
     const targets: TrackerAccountTarget[] = [];
+    const expectedMarketEnv = this.expectedMarketEnv();
 
     for (const account of accounts) {
       const credentials = await this.accountCredentialRepo.findByAccountId(account.id);
@@ -45,10 +50,18 @@ export class TrackerTargetService {
           c.isActive &&
           c.brokerage !== null &&
           c.marketEnv !== null &&
-          c.accountExternalId !== null,
+          c.marketEnv === expectedMarketEnv &&
+          c.accountExternalId !== null &&
+          c.apiCredentialId !== null,
       );
 
-      if (!active || !active.brokerage || !active.marketEnv || !active.accountExternalId) {
+      if (
+        !active ||
+        !active.brokerage ||
+        !active.marketEnv ||
+        !active.accountExternalId ||
+        active.apiCredentialId === null
+      ) {
         continue;
       }
 
@@ -57,11 +70,65 @@ export class TrackerTargetService {
         accountExternalId: active.accountExternalId,
         brokerage: active.brokerage,
         marketEnv: active.marketEnv === 'PRODUCTION' ? 'production' : 'mock',
+        accountCredentialId: active.id,
+        apiCredentialId: active.apiCredentialId,
       });
     }
 
     return targets.filter((target) =>
       shouldHandle(target.accountExternalId, this.runtime.shardIndex, this.runtime.shardCount),
     );
+  }
+
+  async findShardedTargetByExternalId(
+    accountExternalId: string,
+  ): Promise<TrackerAccountTarget | null> {
+    const targets = await this.shardedTargets();
+
+    return targets.find((target) => target.accountExternalId === accountExternalId) ?? null;
+  }
+
+  async activeCredentialTargets(): Promise<TrackerAccountTarget[]> {
+    const accounts = await this.accountRepo.findActiveAccounts();
+    const byCredentialId = new Map<number, TrackerAccountTarget>();
+    const expectedMarketEnv = this.expectedMarketEnv();
+
+    for (const account of accounts) {
+      const credentials = await this.accountCredentialRepo.findByAccountId(account.id);
+      const active = credentials.find(
+        (c) =>
+          c.isActive &&
+          c.brokerage !== null &&
+          c.marketEnv !== null &&
+          c.marketEnv === expectedMarketEnv &&
+          c.accountExternalId !== null &&
+          c.apiCredentialId !== null,
+      );
+
+      if (
+        !active ||
+        !active.brokerage ||
+        !active.marketEnv ||
+        !active.accountExternalId ||
+        active.apiCredentialId === null
+      ) {
+        continue;
+      }
+
+      byCredentialId.set(active.apiCredentialId, {
+        accountId: account.id,
+        accountExternalId: active.accountExternalId,
+        brokerage: active.brokerage,
+        marketEnv: active.marketEnv === 'PRODUCTION' ? 'production' : 'mock',
+        accountCredentialId: active.id,
+        apiCredentialId: active.apiCredentialId,
+      });
+    }
+
+    return Array.from(byCredentialId.values()).sort((a, b) => a.apiCredentialId - b.apiCredentialId);
+  }
+
+  private expectedMarketEnv(): 'MOCK' | 'PRODUCTION' {
+    return this.kiwoom.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK';
   }
 }

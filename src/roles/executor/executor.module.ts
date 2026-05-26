@@ -1,7 +1,7 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
-import { EXECUTOR_STATUS } from '@roles/role-status';
+import { EXECUTOR_METRICS, EXECUTOR_STATUS } from '@roles/role-status';
 import { OrderAttemptEntity } from '@shared/persistence/order/order-attempt.entity';
 import {
   ORDER_ATTEMPT_REPOSITORY,
@@ -11,6 +11,7 @@ import { ExecutorOrderService } from './service/executor-order.service';
 import { ExecutorStatusService } from './service/executor-status.service';
 import { SignalDetectedConsumer } from './trigger/consumer/signal-detected.consumer';
 import { OrderPickupScheduler } from './trigger/scheduler/order-pickup.scheduler';
+import { OrderCommandSubscriber } from './trigger/subscriber/order-command.subscriber';
 import { PickupCancellingOrdersUsecase } from './usecase/pickup-cancelling-orders.usecase';
 import { PickupRequestedOrdersUsecase } from './usecase/pickup-requested-orders.usecase';
 import { PlaceOrderUsecase } from './usecase/place-order.usecase';
@@ -31,10 +32,12 @@ import { PlaceOrderUsecase } from './usecase/place-order.usecase';
     PickupRequestedOrdersUsecase,
     PickupCancellingOrdersUsecase,
     OrderPickupScheduler,
+    OrderCommandSubscriber,
     SignalDetectedConsumer,
     { provide: EXECUTOR_STATUS, useExisting: ExecutorStatusService },
+    { provide: EXECUTOR_METRICS, useExisting: ExecutorStatusService },
   ],
-  exports: [EXECUTOR_STATUS],
+  exports: [EXECUTOR_STATUS, EXECUTOR_METRICS],
 })
 export class ExecutorModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(ExecutorModule.name);

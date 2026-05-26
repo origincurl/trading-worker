@@ -4,6 +4,7 @@ import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token'
 import type {
   BrokerageVendor,
   MarketDataFrameKind,
+  SubscribeMarketDataInput,
 } from '@external/brokerage/vendor/brokerage.vendor';
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
@@ -12,11 +13,28 @@ import { StrategyDemandService } from '@roles/collector/service/strategy-demand.
 import { UniverseService } from '@roles/collector/service/universe.service';
 import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
 
-// FE-observation refcnt HASH keys. BE WS gateway maintains them (HINCRBY on
-// subscribe / HDEL on count→0). Worker reads HKEYS — values are
-// reference counts, not used here.
+type RebalanceCapableBrokerageVendor = BrokerageVendor & {
+  rebalanceMarketData(input: SubscribeMarketDataInput): Promise<void>;
+};
+
+type ReconnectCapableBrokerageVendor = BrokerageVendor & {
+  reconnectMarketDataStream(): Promise<void>;
+};
+
+type CapDroppedCapableBrokerageVendor = BrokerageVendor & {
+  marketDataCapDroppedSymbols(): readonly string[];
+};
+
+// FE-observation lease keys. New BE chart streams create one short-lived key
+// per active subscription so abnormal exits self-heal. Legacy refcount HASH
+// keys are accepted only when they have a TTL; TTL-less hashes are treated as
+// stale leftovers because they cannot self-heal after abnormal browser exits.
+const FE_OBSERVATION_STOCKS_LEASE_PATTERN = 'fe:observation:stocks:lease:*';
+const FE_OBSERVATION_ETFS_LEASE_PATTERN = 'fe:observation:etfs:lease:*';
 const FE_OBSERVATION_STOCKS_HASH = 'fe:observation:stocks:refcnt';
 const FE_OBSERVATION_ETFS_HASH = 'fe:observation:etfs:refcnt';
+const FE_OBSERVATION_SCAN_COUNT = 100;
+const LEGACY_OBSERVATION_HASH_NO_TTL = -1;
 
 export interface SubscriptionDriftSnapshot {
   readonly desiredNotRequestedCount: number;
@@ -40,11 +58,13 @@ export interface SubscriptionStateSnapshot {
   readonly desiredCount: number;
   readonly actualRequestedCount: number;
   readonly actualEffectiveCount: number;
+  readonly capDroppedCount: number;
   readonly desiredSample: readonly string[];
   // Worker-local requested set after REG/REMOVE send completion. This is not broker-confirmed.
   readonly actualRequestedSample: readonly string[];
   // Frame-backed coverage: requested symbols that emitted a frame inside effectiveWindowMs.
   readonly actualEffectiveSample: readonly string[];
+  readonly capDroppedSample: readonly string[];
   readonly drift: SubscriptionDriftSnapshot;
   readonly lastReconcileAt: string | null;
   readonly lastHintAt: string | null;
@@ -97,6 +117,8 @@ export class RefreshUniverseUsecase {
 
   private actualSymbols: readonly string[] = [];
 
+  private capDroppedSymbols: readonly string[] = [];
+
   private assignedSymbols: readonly string[] = [];
 
   private activeCollectors: readonly string[] = [];
@@ -112,6 +134,8 @@ export class RefreshUniverseUsecase {
   private heartbeatRoleMisses = 0;
 
   private readonly lastFrameAtBySymbol = new Map<string, number>();
+
+  private readonly ignoredLegacyObservationKeys = new Set<string>();
 
   constructor(
     @Inject(COLLECTOR_CONFIG) private readonly collectorConfig: CollectorConfig,
@@ -155,7 +179,9 @@ export class RefreshUniverseUsecase {
     const assigned = normalizeSymbols(this.assignedSymbols);
     const actualRequested = normalizeSymbols(this.actualSymbols);
     const actualEffective = this.effectiveSymbols();
-    const desiredNotRequested = difference(desired, actualRequested);
+    const capDropped = normalizeSymbols(this.capDroppedSymbols);
+    const requestedOrCapBlocked = normalizeSymbols([...actualRequested, ...capDropped]);
+    const desiredNotRequested = difference(desired, requestedOrCapBlocked);
     const requestedNotDesired = difference(actualRequested, desired);
     const requestedNotEffective = difference(actualRequested, actualEffective);
     const effectiveNotRequested = difference(actualEffective, actualRequested);
@@ -170,9 +196,11 @@ export class RefreshUniverseUsecase {
       desiredCount: desired.length,
       actualRequestedCount: actualRequested.length,
       actualEffectiveCount: actualEffective.length,
+      capDroppedCount: capDropped.length,
       desiredSample: sample(desired),
       actualRequestedSample: sample(actualRequested),
       actualEffectiveSample: sample(actualEffective),
+      capDroppedSample: sample(capDropped),
       drift: {
         desiredNotRequestedCount: desiredNotRequested.length,
         requestedNotDesiredCount: requestedNotDesired.length,
@@ -252,9 +280,25 @@ export class RefreshUniverseUsecase {
     this.heartbeatRoleMisses = assignment.heartbeatRoleMisses;
 
     if (!this.gateway.isMarketDataStreamConnected()) {
-      this.logger.warn('gateway not connected — universe REG deferred');
+      const reconnector = marketDataReconnector(this.gateway);
 
-      return;
+      if (!reconnector) {
+        this.logger.warn('gateway not connected — universe REG deferred');
+
+        return;
+      }
+
+      try {
+        await reconnector.reconnectMarketDataStream();
+      } catch (err) {
+        this.logger.warn(
+          `gateway reconnect failed — universe REG deferred: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+
+        return;
+      }
     }
 
     const kinds: MarketDataFrameKind[] = ['trade-tick'];
@@ -262,22 +306,30 @@ export class RefreshUniverseUsecase {
     if (this.collectorConfig.subscribeOrderbook) kinds.push('orderbook');
 
     const plan = this.planner.plan(this.actualSymbols, target);
+    const rebalancer = marketDataRebalancer(this.gateway);
 
-    if (plan.remove.length > 0) {
-      await this.gateway.unsubscribeMarketData({ symbols: [...plan.remove], kinds });
+    if (rebalancer) {
+      await rebalancer.rebalanceMarketData({ symbols: target, kinds });
+    } else {
+      if (plan.remove.length > 0) {
+        await this.gateway.unsubscribeMarketData({ symbols: [...plan.remove], kinds });
+      }
+
+      if (plan.add.length > 0) {
+        await this.gateway.subscribeMarketData({ symbols: [...plan.add], kinds });
+      }
     }
 
-    if (plan.add.length > 0) {
-      await this.gateway.subscribeMarketData({ symbols: [...plan.add], kinds });
-    }
-
-    this.actualSymbols = [...target];
+    this.capDroppedSymbols = normalizeSymbols(capDroppedSymbols(this.gateway)).filter((symbol) =>
+      target.includes(symbol),
+    );
+    this.actualSymbols = difference(target, this.capDroppedSymbols);
 
     this._lastReconcileAt = new Date();
 
-    if (plan.add.length > 0 || plan.remove.length > 0) {
+    if (plan.add.length > 0 || plan.remove.length > 0 || this.capDroppedSymbols.length > 0) {
       this.logger.log(
-        `universe reconcile desired=${target.length} add=${plan.add.length} remove=${plan.remove.length} kinds=[${kinds.join(',')}]`,
+        `universe reconcile desired=${target.length} requested=${this.actualSymbols.length} capDropped=${this.capDroppedSymbols.length} add=${plan.add.length} remove=${plan.remove.length} kinds=[${kinds.join(',')}]`,
       );
     }
   }
@@ -286,18 +338,33 @@ export class RefreshUniverseUsecase {
     if (!this.redis) return [];
 
     try {
+      const [stockLeaseSymbols, etfLeaseSymbols] = await Promise.all([
+        this.readLeaseSymbols(FE_OBSERVATION_STOCKS_LEASE_PATTERN),
+        this.readLeaseSymbols(FE_OBSERVATION_ETFS_LEASE_PATTERN),
+      ]);
+
       const [stockKeys, etfKeys] = await Promise.all([
-        this.redis.hkeys(FE_OBSERVATION_STOCKS_HASH),
-        this.redis.hkeys(FE_OBSERVATION_ETFS_HASH),
+        this.readLegacyObservedSymbols(FE_OBSERVATION_STOCKS_HASH),
+        this.readLegacyObservedSymbols(FE_OBSERVATION_ETFS_HASH),
       ]);
 
       return [
-        ...(Array.isArray(stockKeys) ? stockKeys : []).map((symbol) => ({
+        ...stockLeaseSymbols.map((symbol) => ({
           symbol,
           source: 'CHART' as const,
           instrumentType: 'STOCK' as const,
         })),
-        ...(Array.isArray(etfKeys) ? etfKeys : []).map((symbol) => ({
+        ...etfLeaseSymbols.map((symbol) => ({
+          symbol,
+          source: 'CHART' as const,
+          instrumentType: 'ETF' as const,
+        })),
+        ...stockKeys.map((symbol) => ({
+          symbol,
+          source: 'CHART' as const,
+          instrumentType: 'STOCK' as const,
+        })),
+        ...etfKeys.map((symbol) => ({
           symbol,
           source: 'CHART' as const,
           instrumentType: 'ETF' as const,
@@ -310,6 +377,36 @@ export class RefreshUniverseUsecase {
 
       return [];
     }
+  }
+
+  private async readLegacyObservedSymbols(key: string): Promise<string[]> {
+    if (!this.redis) return [];
+
+    const ttl = await this.redis.ttl(key);
+    if (ttl === LEGACY_OBSERVATION_HASH_NO_TTL) {
+      if (!this.ignoredLegacyObservationKeys.has(key)) {
+        this.ignoredLegacyObservationKeys.add(key);
+        this.logger.warn(`ignoring legacy FE observation hash without TTL key=${key}`);
+      }
+
+      return [];
+    }
+
+    return await this.redis.hkeys(key);
+  }
+
+  private async readLeaseSymbols(pattern: string): Promise<string[]> {
+    if (!this.redis) return [];
+
+    const keys = await scanAll(this.redis, pattern, FE_OBSERVATION_SCAN_COUNT);
+    if (keys.length === 0) return [];
+
+    const values = await this.redis.mget(...keys);
+
+    return values
+      .map((value) => (typeof value === 'string' ? value.trim() : ''))
+      .filter((value): value is string => value.length > 0)
+      .sort();
   }
 
   private effectiveSymbols(): string[] {
@@ -346,4 +443,51 @@ function difference(left: readonly string[], right: readonly string[]): string[]
 
 function sample(symbols: readonly string[]): string[] {
   return symbols.slice(0, SAMPLE_SIZE);
+}
+
+function marketDataRebalancer(
+  gateway: BrokerageVendor,
+): RebalanceCapableBrokerageVendor | null {
+  const maybe = gateway as Partial<RebalanceCapableBrokerageVendor>;
+
+  return typeof maybe.rebalanceMarketData === 'function'
+    ? (gateway as RebalanceCapableBrokerageVendor)
+    : null;
+}
+
+function marketDataReconnector(
+  gateway: BrokerageVendor,
+): ReconnectCapableBrokerageVendor | null {
+  const maybe = gateway as Partial<ReconnectCapableBrokerageVendor>;
+
+  return typeof maybe.reconnectMarketDataStream === 'function'
+    ? (gateway as ReconnectCapableBrokerageVendor)
+    : null;
+}
+
+function capDroppedSymbols(gateway: BrokerageVendor): readonly string[] {
+  const maybe = gateway as Partial<CapDroppedCapableBrokerageVendor>;
+
+  return typeof maybe.marketDataCapDroppedSymbols === 'function'
+    ? maybe.marketDataCapDroppedSymbols()
+    : [];
+}
+
+async function scanAll(
+  redis: NonNullable<RedisClientToken>,
+  pattern: string,
+  count: number,
+): Promise<string[]> {
+  let cursor = '0';
+  const keys: string[] = [];
+
+  do {
+    const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', count);
+
+    cursor = nextCursor;
+
+    keys.push(...batch);
+  } while (cursor !== '0');
+
+  return keys.sort();
 }

@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { Redis, type RedisOptions } from 'ioredis';
 import { REDIS_CONFIG, type RedisConfig } from '@config/redis.config';
+import { HeartbeatScheduler } from './heartbeat.scheduler';
 import { HeartbeatWriter } from './heartbeat.writer';
 import { LatestPriceWriter } from './latest-price.writer';
 import { MarketSnapshotWriter } from './market-snapshot.writer';
@@ -51,6 +52,7 @@ const redisSubscriberProvider: Provider = {
     LatestPriceWriter,
     MarketSnapshotWriter,
     HeartbeatWriter,
+    HeartbeatScheduler,
   ],
   exports: [
     REDIS_CLIENT,

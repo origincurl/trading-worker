@@ -13,6 +13,7 @@ export interface OrderFilledPayload {
   readonly accountId: string;
   readonly clientOrderId: string;
   readonly vendorOrderId: string;
+  readonly externalFillId?: string;
   readonly symbol: string;
   readonly side: OrderIntentSide;
   readonly filledQty: number;

@@ -9,13 +9,13 @@ export class TrackerConfigDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  TRACKER_BALANCE_POLL_INTERVAL_SEC: number = 5;
+  TRACKER_BALANCE_POLL_INTERVAL_SEC: number = 60;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  TRACKER_POSITION_POLL_INTERVAL_SEC: number = 5;
+  TRACKER_POSITION_POLL_INTERVAL_SEC: number = 60;
 
   @IsOptional()
   @IsString()

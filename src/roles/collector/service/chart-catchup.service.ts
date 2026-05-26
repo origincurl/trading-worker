@@ -21,8 +21,17 @@ export interface ChartCatchupRequest {
   readonly symbol: string;
   readonly chartMarket?: CandleChartMarket;
   readonly intervalType: '1m' | '1d';
+  readonly baseDt?: string;
   readonly fromIso: string;
   readonly toIso: string;
+  readonly acceptFromIso?: string;
+  readonly acceptToIso?: string;
+  readonly targetFromIso?: string;
+  readonly targetToIso?: string;
+  readonly targetRanges?: ReadonlyArray<{
+    readonly fromIso: string;
+    readonly toIso: string;
+  }>;
 }
 
 export interface ChartCatchupResult {
@@ -48,17 +57,17 @@ export class ChartCatchupService {
 
     try {
       const rows: MarketCandleClosedPayload[] = await this.gateway.fetchChartCandles({
+        requestId: request.requestId,
         symbol: request.symbol,
         marketEnv: request.marketEnv,
         chartMarket: request.chartMarket,
         intervalType: request.intervalType,
         fromIso: request.fromIso,
         toIso: request.toIso,
+        baseDt: request.baseDt,
+        acceptFromIso: request.acceptFromIso,
+        acceptToIso: request.acceptToIso,
       });
-
-      if (rows.length === 0) {
-        await this.emptyRanges.recordEmpty(request, 'transient');
-      }
 
       for (const row of rows) {
         const r = await this.repo.upsertClosed(row);
@@ -66,6 +75,8 @@ export class ChartCatchupService {
         if (r === 'skipped') skipped += 1;
         else written += 1;
       }
+
+      await this.recordEmptyTargets(request, rows);
     } catch (err) {
       errors.push({
         code: 'kiwoom-chart-failed',
@@ -78,5 +89,36 @@ export class ChartCatchupService {
     }
 
     return { candlesWritten: written, candlesSkipped: skipped, errors };
+  }
+
+  private async recordEmptyTargets(
+    request: ChartCatchupRequest,
+    rows: readonly MarketCandleClosedPayload[],
+  ): Promise<void> {
+    const targetRanges =
+      request.targetRanges && request.targetRanges.length > 0
+        ? request.targetRanges
+        : [
+            {
+              fromIso: request.targetFromIso ?? request.fromIso,
+              toIso: request.targetToIso ?? request.toIso,
+            },
+          ];
+
+    for (const target of targetRanges) {
+      const fromMs = Date.parse(target.fromIso);
+      const toMs = Date.parse(target.toIso);
+      if (!Number.isFinite(fromMs) || !Number.isFinite(toMs) || fromMs >= toMs) continue;
+
+      const hasRowsInTarget = rows.some((row) => {
+        const bucketStartMs = Date.parse(row.bucketStart);
+
+        return Number.isFinite(bucketStartMs) && bucketStartMs >= fromMs && bucketStartMs < toMs;
+      });
+
+      if (!hasRowsInTarget) {
+        await this.emptyRanges.recordEmptyRange(request, target.fromIso, target.toIso, 'transient');
+      }
+    }
   }
 }

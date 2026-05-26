@@ -111,9 +111,26 @@ export class ChartCatchupRequestSubscriber
       typeof payload?.requestId === 'string' &&
       typeof payload?.symbol === 'string' &&
       (payload.marketEnv === 'mock' || payload.marketEnv === 'production') &&
+      (payload.chartMarket === undefined ||
+        payload.chartMarket === 'KRW' ||
+        payload.chartMarket === 'AL' ||
+        payload.chartMarket === 'NXT') &&
       (payload.intervalType === '1m' || payload.intervalType === '1d') &&
+      (payload.baseDt === undefined || /^\d{8}$/.test(payload.baseDt)) &&
       typeof payload.fromIso === 'string' &&
-      typeof payload.toIso === 'string'
+      typeof payload.toIso === 'string' &&
+      (payload.acceptFromIso === undefined || typeof payload.acceptFromIso === 'string') &&
+      (payload.acceptToIso === undefined || typeof payload.acceptToIso === 'string') &&
+      (payload.targetFromIso === undefined || typeof payload.targetFromIso === 'string') &&
+      (payload.targetToIso === undefined || typeof payload.targetToIso === 'string') &&
+      (payload.targetRanges === undefined ||
+        (Array.isArray(payload.targetRanges) &&
+          payload.targetRanges.every(
+            (range) =>
+              typeof range?.fromIso === 'string' &&
+              typeof range?.toIso === 'string' &&
+              Date.parse(range.fromIso) < Date.parse(range.toIso),
+          )))
     );
   }
 }

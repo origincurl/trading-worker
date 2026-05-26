@@ -44,15 +44,6 @@ export class ApiCredentialEntity {
   @Column({ name: 'app_secret_enc', type: 'text', nullable: true })
   appSecretEnc!: string | null;
 
-  @Column({ name: 'access_token_enc', type: 'text', nullable: true })
-  accessTokenEnc!: string | null;
-
-  @Column({ name: 'refresh_token_enc', type: 'text', nullable: true })
-  refreshTokenEnc!: string | null;
-
-  @Column({ name: 'token_expires_at', type: 'timestamp', nullable: true })
-  tokenExpiresAt!: Date | null;
-
   @Column({ name: 'key_expires_at', type: 'timestamp', nullable: true })
   keyExpiresAt!: Date | null;
 
@@ -68,26 +59,11 @@ export class ApiCredentialEntity {
   @Column({ name: 'status_reason', type: 'text', nullable: true })
   statusReason!: string | null;
 
-  @Column({ name: 'status_changed_at', type: 'timestamp', nullable: true })
-  statusChangedAt!: Date | null;
-
-  @Column({ name: 'last_health_check_at', type: 'timestamp', nullable: true })
-  lastHealthCheckAt!: Date | null;
-
   @Column({ name: 'last_success_at', type: 'timestamp', nullable: true })
   lastSuccessAt!: Date | null;
 
   @Column({ name: 'last_failed_at', type: 'timestamp', nullable: true })
   lastFailedAt!: Date | null;
-
-  @Column({ name: 'consecutive_failures', type: 'int', default: 0 })
-  consecutiveFailures!: number;
-
-  @Column({ name: 'last_error_code', type: 'varchar', length: 100, nullable: true })
-  lastErrorCode!: string | null;
-
-  @Column({ name: 'last_error_message', type: 'text', nullable: true })
-  lastErrorMessage!: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamp' })
   createdAt!: Date;

@@ -53,10 +53,27 @@ export interface UpdateOrderRepositoryInput {
 export interface OrderRepository {
   // Batch pickup for executor / tracker pollers. Uses SKIP LOCKED so
   // multiple worker pods can pull non-overlapping slices safely.
+  findOrderById(id: number): Promise<OrderModel | null>;
   findRequestedBatch(batchSize: number): Promise<OrderModel[]>;
+  findAndClaimRequestedById(id: number): Promise<OrderModel | null>;
   findCancellingBatch(batchSize: number): Promise<OrderModel[]>;
   // Insert an order row driven by an executor decision.
   createDecisionOrder(input: CreateDecisionOrderInput): Promise<OrderModel>;
   // Atomic status / lifecycle update. Returns true if a row was matched.
   updateStatus(id: number, fields: UpdateOrderRepositoryInput): Promise<boolean>;
+  updateStatusFromExpected(
+    id: number,
+    expectedStatuses: readonly OrderStatus[],
+    fields: UpdateOrderRepositoryInput,
+  ): Promise<boolean>;
+  attachBrokerOrderIdFromExpected(
+    id: number,
+    expectedStatuses: readonly OrderStatus[],
+    brokerOrderId: string,
+  ): Promise<boolean>;
+  findStaleOrders(
+    statuses: readonly OrderStatus[],
+    olderThan: Date,
+    limit: number,
+  ): Promise<OrderModel[]>;
 }

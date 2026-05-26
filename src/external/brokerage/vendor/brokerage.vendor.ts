@@ -32,6 +32,7 @@ export interface CancelOrderInput {
 export interface ModifyOrderInput {
   readonly accountId: string;
   readonly vendorOrderId: string;
+  readonly symbol?: string;
   readonly quantity?: number;
   readonly price?: number;
 }
@@ -59,15 +60,20 @@ export interface MarketDataSubscription {
 }
 
 // Phase E: chart catchup. Collector calls this to backfill closed candles
-// for a (symbol, intervalType) range. Returned rows are filtered to the
-// half-open [fromIso, toIso) window and ordered ascending by bucketStart.
+// for a (symbol, intervalType) range. Kiwoom chart APIs are anchor based:
+// baseDt is sent to the broker, while acceptFrom/acceptTo decide which rows
+// are persisted from the returned cap-sized batch.
 export interface FetchChartCandlesInput {
+  readonly requestId?: string;
   readonly symbol: string;
   readonly marketEnv: 'mock' | 'production';
   readonly chartMarket?: CandleChartMarket;
   readonly intervalType: '1m' | '1d';
   readonly fromIso: string;
   readonly toIso: string;
+  readonly baseDt?: string;
+  readonly acceptFromIso?: string;
+  readonly acceptToIso?: string;
 }
 
 // Phase E: stock master list. One entry per listed symbol on a given
@@ -120,6 +126,15 @@ export interface BrokerageVendor {
   // CredentialSourceService. accountExternalId stays on the payload
   // because vendor APIs take the external string.
   placeOrderForAccount(accountId: number, input: PlaceOrderInput): Promise<OrderAckModel>;
+  // Uses the api credential stamped on the order row at creation time.
+  // This avoids auth/body drift if account credential assignment changes
+  // between BE order creation and executor pickup.
+  placeOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    input: PlaceOrderInput,
+  ): Promise<OrderAckModel>;
   cancelOrder(input: CancelOrderInput): Promise<OrderAckModel>;
   // Phase J pair to placeOrderForAccount: cancellation pickup resolves
   // credentials through CredentialSourceService against the order's
@@ -130,6 +145,16 @@ export interface BrokerageVendor {
     accountId: number,
     accountExternalId: string,
     externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
+  ): Promise<OrderAckModel>;
+  cancelOrderForAccountCredential(
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+    externalOrderId: string,
+    symbol?: string,
+    quantity?: number,
   ): Promise<OrderAckModel>;
   modifyOrder(input: ModifyOrderInput): Promise<OrderAckModel>;
   modifyOrderForAccount(accountId: number, input: ModifyOrderInput): Promise<OrderAckModel>;

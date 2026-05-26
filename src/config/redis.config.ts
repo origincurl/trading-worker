@@ -25,7 +25,7 @@ export class RedisConfigDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  REDIS_HEARTBEAT_TTL_SEC: number = 30;
+  REDIS_HEARTBEAT_TTL_SEC: number = 45;
 
   @Type(() => Number)
   @IsInt()

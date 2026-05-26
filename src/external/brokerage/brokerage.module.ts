@@ -9,6 +9,7 @@ import {
   EXECUTOR_BROKERAGE_VENDOR,
   type BrokerageVendorProfile,
 } from './brokerage.token';
+import type { BrokerageVendor } from './vendor/brokerage.vendor';
 import { CredentialCooldownService } from './credential/credential-cooldown.service';
 import type { BrokerageCredentialMaterial } from './credential/brokerage-credential-material';
 import { CredentialSourceService } from './credential/credential-source.service';
@@ -17,7 +18,9 @@ import { COLLECTOR_CREDENTIAL_LIMIT_REPOSITORY } from '@shared/persistence/colle
 import type { CollectorCredentialLimitRepository } from '@shared/persistence/collector-credential/collector-credential-limit.repository';
 import { BrokerageVendorResolver } from './service/brokerage-vendor.resolver';
 import { RateLimiter } from './service/rate-limiter.service';
+import { SharedCredentialRateLimiter } from './service/shared-credential-rate-limiter.service';
 import { KiwoomTokenService } from './platforms/kiwoom/auth/kiwoom-token.service';
+import { KiwoomCollectorWsFanoutVendor } from './platforms/kiwoom/kiwoom-collector-ws-fanout.vendor';
 import { KiwoomApiClient, type KiwoomTokenResult } from './platforms/kiwoom/kiwoom.api-client';
 import { KiwoomBrokerageVendor } from './platforms/kiwoom/kiwoom-brokerage.vendor';
 import { KiwoomWsClient } from './platforms/kiwoom/kiwoom-ws.client';
@@ -40,7 +43,7 @@ function buildKiwoomGateway(
   source: CredentialSourceService,
   usage: CredentialUsageService,
   collectorRuntimeState: CollectorCredentialLimitRepository,
-): KiwoomBrokerageVendor {
+): BrokerageVendor {
   let lastWsCredentialId: number | null = null;
   let stickyCollectorWsMaterial: BrokerageCredentialMaterial | null = null;
 
@@ -116,6 +119,39 @@ function buildKiwoomGateway(
     };
   };
 
+  const accountCredentialTokenSupplier = async (
+    accountId: number,
+    apiCredentialId: number,
+    accountExternalId: string,
+  ): Promise<KiwoomTokenResult> => {
+    const material = await source.selectAccountCredentialByApiCredential(
+      accountId,
+      apiCredentialId,
+    );
+
+    if (material.accountExternalId !== accountExternalId) {
+      throw new DomainError(
+        'stamped order accountExternalId does not match active account credential',
+        'ACCOUNT_CREDENTIAL_ACCOUNT_MISMATCH',
+        {
+          accountId,
+          apiCredentialId,
+        },
+      );
+    }
+
+    const token = await tokenCache.getAccessToken(material);
+
+    return {
+      token,
+      credential: {
+        kind: 'executor',
+        credentialId: material.credentialId,
+        accountId,
+      },
+    };
+  };
+
   const apiTokenSupplier =
     profile === 'collector' ? collectorRestTokenSupplier : executorTokenSupplier;
   const wsTokenSupplier =
@@ -144,12 +180,14 @@ function buildKiwoomGateway(
     tokenSupplier: wsTokenSupplier,
   });
 
-  return new KiwoomBrokerageVendor({
+  const gateway = new KiwoomBrokerageVendor({
     profile,
     apiClient,
     wsClient,
     tokenSupplier: wsTokenSupplier,
     accountTokenSupplier: profile === 'executor' ? accountTokenSupplier : undefined,
+    accountCredentialTokenSupplier:
+      profile === 'executor' ? accountCredentialTokenSupplier : undefined,
     usage,
     collectorRuntimeState,
     invalidateToken: () => {
@@ -164,6 +202,18 @@ function buildKiwoomGateway(
       }
     },
     reconnect: { enabled: true },
+  });
+
+  if (profile !== 'collector') return gateway;
+
+  return new KiwoomCollectorWsFanoutVendor({
+    delegate: gateway,
+    config,
+    apiClient,
+    source,
+    tokenCache,
+    usage,
+    collectorRuntimeState,
   });
 }
 
@@ -230,6 +280,7 @@ const executorGatewayProvider: Provider = {
   providers: [
     CredentialCooldownService,
     CredentialSourceService,
+    SharedCredentialRateLimiter,
     CredentialUsageService,
     KiwoomTokenService,
     AccessTokenCacheService,
@@ -245,6 +296,7 @@ const executorGatewayProvider: Provider = {
     AccessTokenCacheService,
     CredentialCooldownService,
     CredentialUsageService,
+    SharedCredentialRateLimiter,
   ],
 })
 export class BrokerageModule {}

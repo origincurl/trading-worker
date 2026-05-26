@@ -11,6 +11,10 @@ import {
   type WsReconnectResponseDto,
 } from '@admin/dto/ws-reconnect.dto';
 
+type ReconnectCapableBrokerageVendor = BrokerageVendor & {
+  reconnectMarketDataStream(): Promise<void>;
+};
+
 // Disconnects the requested profile's WS. The Phase 6.8 reconnect
 // orchestrator picks up the close event and reconnects with backoff —
 // we never call connect() ourselves so the operator triggers a clean,
@@ -49,6 +53,18 @@ export class TriggerWsReconnectUsecase {
     }
 
     try {
+      const reconnector = marketDataReconnector(gateway);
+      if (reconnector) {
+        await reconnector.reconnectMarketDataStream();
+
+        this.logger.log(`ws reconnect requested for profile=${input.profile}`);
+
+        return {
+          triggered: true,
+          detail: 'reconnect issued',
+        };
+      }
+
       await gateway.disconnectMarketDataStream();
 
       this.logger.log(`ws disconnect requested for profile=${input.profile}`);
@@ -64,4 +80,14 @@ export class TriggerWsReconnectUsecase {
       };
     }
   }
+}
+
+function marketDataReconnector(
+  gateway: BrokerageVendor,
+): ReconnectCapableBrokerageVendor | null {
+  const maybe = gateway as Partial<ReconnectCapableBrokerageVendor>;
+
+  return typeof maybe.reconnectMarketDataStream === 'function'
+    ? (gateway as ReconnectCapableBrokerageVendor)
+    : null;
 }

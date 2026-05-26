@@ -1,6 +1,6 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { CALCULATOR_STATUS } from '@roles/role-status';
+import { CALCULATOR_METRICS, CALCULATOR_STATUS } from '@roles/role-status';
 import { IndicatorEntity } from './repository/indicator.entity';
 import { INDICATOR_REPOSITORY, IndicatorRepositoryImpl } from './repository/indicator.repository';
 import { CalculatorStatusService } from './service/calculator-status.service';
@@ -21,8 +21,9 @@ import { ProcessClosedCandleUsecase } from './usecase/process-closed-candle.usec
     ProcessClosedCandleUsecase,
     MarketCandleConsumer,
     { provide: CALCULATOR_STATUS, useExisting: CalculatorStatusService },
+    { provide: CALCULATOR_METRICS, useExisting: CalculatorStatusService },
   ],
-  exports: [CALCULATOR_STATUS],
+  exports: [CALCULATOR_STATUS, CALCULATOR_METRICS],
 })
 export class CalculatorModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(CalculatorModule.name);

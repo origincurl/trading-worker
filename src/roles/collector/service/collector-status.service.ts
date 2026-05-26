@@ -1,6 +1,6 @@
 import { forwardRef, Inject, Injectable } from '@nestjs/common';
 import type { HeartbeatMetrics } from '@shared/cache/heartbeat.writer';
-import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
+import type { RoleMetricProvider, RoleStatus, RoleStatusProvider } from '@roles/role-status';
 import { KiwoomTickSubscriber } from '@roles/collector/trigger/subscriber/kiwoom-tick.subscriber';
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
@@ -12,7 +12,7 @@ import { MarketTickService } from './market-tick.service';
 import { UniverseService } from './universe.service';
 
 @Injectable()
-export class CollectorStatusService implements RoleStatusProvider {
+export class CollectorStatusService implements RoleStatusProvider, RoleMetricProvider {
   private readonly bootedAt = Date.now();
 
   constructor(
@@ -43,6 +43,14 @@ export class CollectorStatusService implements RoleStatusProvider {
 
   getSubscriptionState(): SubscriptionStateSnapshot {
     return this.refreshUniverse.subscriptionState();
+  }
+
+  getRoleMetrics() {
+    return {
+      role: 'collector' as const,
+      metrics: this.getMetrics(),
+      subscriptionState: this.getSubscriptionState(),
+    };
   }
 
   getStatus(): RoleStatus {

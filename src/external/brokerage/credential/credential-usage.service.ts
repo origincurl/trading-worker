@@ -2,25 +2,54 @@ import { Injectable, Optional } from '@nestjs/common';
 import { redactPotentialSecrets } from '@common/util/redact.util';
 import type { BrokerageVendorProfile } from '../brokerage.token';
 import { RateLimiter } from '../service/rate-limiter.service';
+import { SharedCredentialRateLimiter } from '../service/shared-credential-rate-limiter.service';
 import { WorkerPolicyCache } from '@shared/policy/worker-policy.cache';
 
 export type CredentialUsageKind = 'collector' | 'executor';
+export type CredentialUsageOrigin =
+  | 'COLLECTOR_MARKET'
+  | 'EXECUTOR_STRATEGY'
+  | 'TRACKER_STATUS'
+  | 'TRACKER_ACCOUNT'
+  | 'BE_MANUAL';
+export type CredentialUsagePriority = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
+export type CredentialUsageActionType =
+  | 'MARKET_DATA'
+  | 'ORDER'
+  | 'CANCEL'
+  | 'MODIFY'
+  | 'STATUS'
+  | 'ACCOUNT_SYNC'
+  | 'WS'
+  | 'TOKEN'
+  | 'UNKNOWN';
 
 export interface CredentialUsageContext {
   readonly kind: CredentialUsageKind;
   readonly credentialId: number;
   readonly accountId?: number;
+  readonly origin?: CredentialUsageOrigin;
+  readonly priority?: CredentialUsagePriority;
+  readonly actionType?: CredentialUsageActionType;
+  readonly endpointType?: string;
 }
 
 export interface CredentialUsageHistoryEntry {
   readonly at: string;
   readonly level: 'info' | 'warn' | 'error';
   readonly message: string;
+  readonly apiId?: string;
+  readonly endpointPath?: string;
+  readonly meta?: Record<string, string>;
 }
 
 export interface CredentialUsageSnapshot {
   readonly key: string;
   readonly kind: CredentialUsageKind;
+  readonly origin: CredentialUsageOrigin;
+  readonly priority: CredentialUsagePriority;
+  readonly actionType: CredentialUsageActionType;
+  readonly endpointType: string;
   readonly credentialId: number;
   readonly accountId: number | null;
   readonly profile: BrokerageVendorProfile;
@@ -29,6 +58,13 @@ export interface CredentialUsageSnapshot {
   readonly successes: number;
   readonly failures: number;
   readonly rateLimited: number;
+  readonly granted: number;
+  readonly delayed: number;
+  readonly rejected: number;
+  readonly coalesced: number;
+  readonly sharedLimiter: 'disabled' | 'enabled';
+  readonly limiterConfig?: RateLimitConfig;
+  readonly restQueue?: RestQueueStateSnapshot;
   readonly inFlight: number;
   readonly wsConnections: number;
   readonly wsSymbols: number;
@@ -40,8 +76,21 @@ export interface CredentialUsageSnapshot {
   readonly history: readonly CredentialUsageHistoryEntry[];
 }
 
+export interface RestQueueStateSnapshot {
+  readonly measuredRps: number | null;
+  readonly bucketSecond: number | null;
+  readonly bucketCount: number;
+  readonly queued: number;
+  readonly nextAvailableAt: string | null;
+  readonly waitMs: number;
+}
+
 interface MutableStats {
   kind: CredentialUsageKind;
+  origin: CredentialUsageOrigin;
+  priority: CredentialUsagePriority;
+  actionType: CredentialUsageActionType;
+  endpointType: string;
   credentialId: number;
   accountId: number | null;
   profile: BrokerageVendorProfile;
@@ -50,6 +99,13 @@ interface MutableStats {
   successes: number;
   failures: number;
   rateLimited: number;
+  granted: number;
+  delayed: number;
+  rejected: number;
+  coalesced: number;
+  sharedLimiter: 'disabled' | 'enabled';
+  limiterConfig?: RateLimitConfig;
+  restQueue?: MutableRestQueueState;
   inFlight: number;
   wsConnections: number;
   wsSymbols: number;
@@ -65,6 +121,14 @@ interface RateLimitConfig {
   readonly capacity: number;
   readonly refillPerSecond: number;
   readonly maxConcurrent: number;
+}
+
+interface MutableRestQueueState {
+  measuredRps: number | null;
+  bucketSecond: number | null;
+  bucketCount: number;
+  queued: number;
+  nextAvailableAt: Date | null;
 }
 
 type PolicyValue = {
@@ -93,32 +157,56 @@ export class CredentialUsageService {
 
   private readonly limiterFingerprints = new Map<string, string>();
 
-  constructor(@Optional() private readonly policyCache?: WorkerPolicyCache) {}
+  constructor(
+    @Optional() private readonly policyCache?: WorkerPolicyCache,
+    @Optional() private readonly sharedLimiter?: SharedCredentialRateLimiter,
+  ) {}
 
   async runRest<T>(
     profile: BrokerageVendorProfile,
     credential: CredentialUsageContext,
     endpoint: string,
     fn: () => Promise<T>,
+    request?: {
+      readonly apiId?: string;
+      readonly endpointPath?: string;
+      readonly meta?: Record<string, string | number | boolean | null | undefined>;
+    },
   ): Promise<T> {
     const stats = this.getStats(profile, credential, endpoint);
     const limiter = this.getLimiter(profile, credential, endpoint);
+    const config = this.resolveLimitConfig(credential, endpoint);
+    let sharedLease: Awaited<ReturnType<SharedCredentialRateLimiter['acquire']>> = null;
 
+    stats.limiterConfig = config;
     stats.requests += 1;
     stats.lastUsedAt = new Date();
-    this.pushHistory(stats, 'info', `REST ${endpoint} request queued`);
+    this.pushHistory(stats, 'info', `REST ${endpoint} request queued`, request);
 
     try {
+      sharedLease = await this.sharedLimiter?.acquire({
+        credentialId: credential.credentialId,
+        endpointType: credential.endpointType ?? endpoint,
+        origin: credential.origin ?? defaultOrigin(credential.kind),
+        priority: credential.priority ?? defaultPriority(credential.kind),
+        actionType: credential.actionType ?? defaultActionType(credential.kind, endpoint),
+        capacity: config.capacity,
+        refillPerSecond: config.refillPerSecond,
+        maxConcurrent: config.maxConcurrent,
+      }) ?? null;
       await limiter.acquire();
     } catch (err) {
+      await sharedLease?.release();
       stats.rateLimited += 1;
+      stats.rejected += 1;
       stats.failures += 1;
       stats.lastFailureAt = new Date();
       stats.lastError = redactPotentialSecrets(err instanceof Error ? err.message : String(err));
-      this.pushHistory(stats, 'warn', `REST ${endpoint} rate-limited: ${stats.lastError}`);
+      this.pushHistory(stats, 'warn', `REST ${endpoint} rate-limited: ${stats.lastError}`, request);
       throw err;
     }
 
+    stats.granted += 1;
     stats.inFlight += 1;
 
     try {
@@ -127,18 +215,28 @@ export class CredentialUsageService {
       stats.successes += 1;
       stats.lastSuccessAt = new Date();
       stats.lastError = null;
-      this.pushHistory(stats, 'info', `REST ${endpoint} success`);
+      this.pushHistory(stats, 'info', `REST ${endpoint} success`, request);
 
       return result;
     } catch (err) {
       stats.failures += 1;
+      if (isBrokerRateLimitError(err)) {
+        stats.rateLimited += 1;
+        stats.rejected += 1;
+      }
       stats.lastFailureAt = new Date();
       stats.lastError = redactPotentialSecrets(err instanceof Error ? err.message : String(err));
-      this.pushHistory(stats, 'error', `REST ${endpoint} failed: ${stats.lastError}`);
+      this.pushHistory(
+        stats,
+        isBrokerRateLimitError(err) ? 'warn' : 'error',
+        `REST ${endpoint} failed: ${stats.lastError}`,
+        request,
+      );
       throw err;
     } finally {
       stats.inFlight = Math.max(0, stats.inFlight - 1);
       limiter.release();
+      await sharedLease?.release();
     }
   }
 
@@ -158,14 +256,20 @@ export class CredentialUsageService {
     this.pushHistory(stats, 'info', `WS connected; symbols=${symbols}`);
   }
 
-  markWsDisconnected(profile: BrokerageVendorProfile, credential: CredentialUsageContext): void {
+  markWsDisconnected(
+    profile: BrokerageVendorProfile,
+    credential: CredentialUsageContext,
+    reason?: string,
+  ): void {
     const stats = this.getStats(profile, credential, 'WS');
+    const safeReason = reason ? redactPotentialSecrets(reason) : null;
 
     stats.wsConnections = 0;
     stats.wsSymbols = 0;
     stats.wsSymbolList = [];
     stats.lastUsedAt = new Date();
-    this.pushHistory(stats, 'warn', 'WS disconnected');
+    stats.lastError = safeReason ?? stats.lastError;
+    this.pushHistory(stats, 'warn', safeReason ? `WS disconnected: ${safeReason}` : 'WS disconnected');
   }
 
   markWsSymbols(
@@ -182,11 +286,44 @@ export class CredentialUsageService {
     this.pushHistory(stats, 'info', `WS symbols changed; symbols=${symbols}`);
   }
 
+  markRestQueueState(
+    profile: BrokerageVendorProfile,
+    credential: CredentialUsageContext,
+    endpoint: string,
+    state: {
+      readonly measuredRps: number | null;
+      readonly bucketSecond: number | null;
+      readonly bucketCount: number;
+      readonly queued: number;
+      readonly nextAvailableAtMs: number | null;
+    },
+  ): void {
+    const stats = this.getStats(profile, credential, endpoint);
+
+    stats.restQueue = {
+      measuredRps: state.measuredRps,
+      bucketSecond: state.bucketSecond,
+      bucketCount: state.bucketCount,
+      queued: Math.max(0, state.queued),
+      nextAvailableAt:
+        state.nextAvailableAtMs !== null ? new Date(state.nextAvailableAtMs) : null,
+    };
+  }
+
   snapshot(): CredentialUsageSnapshot[] {
+    const sharedLimiterState: CredentialUsageSnapshot['sharedLimiter'] =
+      this.sharedLimiter?.isEnabled() ? 'enabled' : 'disabled';
+
+    const now = Date.now();
+
     return Array.from(this.stats.entries())
       .map(([key, value]) => ({
         key,
         kind: value.kind,
+        origin: value.origin,
+        priority: value.priority,
+        actionType: value.actionType,
+        endpointType: value.endpointType,
         credentialId: value.credentialId,
         accountId: value.accountId,
         profile: value.profile,
@@ -195,6 +332,24 @@ export class CredentialUsageService {
         successes: value.successes,
         failures: value.failures,
         rateLimited: value.rateLimited,
+        granted: value.granted,
+        delayed: value.delayed,
+        rejected: value.rejected,
+        coalesced: value.coalesced,
+        sharedLimiter: sharedLimiterState,
+        limiterConfig: value.limiterConfig,
+        restQueue: value.restQueue
+          ? {
+              measuredRps: value.restQueue.measuredRps,
+              bucketSecond: value.restQueue.bucketSecond,
+              bucketCount: value.restQueue.bucketCount,
+              queued: value.restQueue.queued,
+              nextAvailableAt: value.restQueue.nextAvailableAt?.toISOString() ?? null,
+              waitMs: value.restQueue.nextAvailableAt
+                ? Math.max(0, value.restQueue.nextAvailableAt.getTime() - now)
+                : 0,
+            }
+          : undefined,
         inFlight: value.inFlight,
         wsConnections: value.wsConnections,
         wsSymbols: value.wsSymbols,
@@ -220,6 +375,10 @@ export class CredentialUsageService {
 
     const created: MutableStats = {
       kind: credential.kind,
+      origin: credential.origin ?? defaultOrigin(credential.kind),
+      priority: credential.priority ?? defaultPriority(credential.kind),
+      actionType: credential.actionType ?? defaultActionType(credential.kind, endpoint),
+      endpointType: credential.endpointType ?? endpoint,
       credentialId: credential.credentialId,
       accountId: credential.accountId ?? null,
       profile,
@@ -228,6 +387,13 @@ export class CredentialUsageService {
       successes: 0,
       failures: 0,
       rateLimited: 0,
+      granted: 0,
+      delayed: 0,
+      rejected: 0,
+      coalesced: 0,
+      sharedLimiter: this.sharedLimiter?.isEnabled() ? 'enabled' : 'disabled',
+      limiterConfig: undefined,
+      restQueue: undefined,
       inFlight: 0,
       wsConnections: 0,
       wsSymbols: 0,
@@ -249,7 +415,7 @@ export class CredentialUsageService {
     credential: CredentialUsageContext,
     endpoint: string,
   ): RateLimiter {
-    const key = this.key(profile, credential, endpoint);
+    const key = this.limiterKey(profile, credential, endpoint);
     const config = this.resolveLimitConfig(credential, endpoint);
     const fingerprint = JSON.stringify(config);
     const existing = this.limiters.get(key);
@@ -257,7 +423,7 @@ export class CredentialUsageService {
     if (existing && this.limiterFingerprints.get(key) === fingerprint) return existing;
     if (existing) {
       existing.reconfigure({
-        name: `kiwoom.${profile}.${credential.kind}.${credential.credentialId}.${endpoint}`,
+        name: key,
         capacity: config.capacity,
         refillPerSecond: config.refillPerSecond,
         maxConcurrent: config.maxConcurrent,
@@ -269,7 +435,7 @@ export class CredentialUsageService {
     }
 
     const created = new RateLimiter({
-      name: `kiwoom.${profile}.${credential.kind}.${credential.credentialId}.${endpoint}`,
+      name: key,
       capacity: config.capacity,
       refillPerSecond: config.refillPerSecond,
       maxConcurrent: config.maxConcurrent,
@@ -307,20 +473,64 @@ export class CredentialUsageService {
     credential: CredentialUsageContext,
     endpoint: string,
   ): string {
-    return `${profile}:${credential.kind}:${credential.credentialId}:${credential.accountId ?? 'none'}:${endpoint}`;
+    const origin = credential.origin ?? defaultOrigin(credential.kind);
+    const actionType = credential.actionType ?? defaultActionType(credential.kind, endpoint);
+    const endpointType = credential.endpointType ?? endpoint;
+
+    return `${profile}:${origin}:${credential.credentialId}:${credential.accountId ?? 'none'}:${endpointType}:${actionType}`;
   }
 
-  private pushHistory(stats: MutableStats, level: CredentialUsageHistoryEntry['level'], message: string): void {
+  private limiterKey(
+    profile: BrokerageVendorProfile,
+    credential: CredentialUsageContext,
+    endpoint: string,
+  ): string {
+    const endpointType = credential.endpointType ?? endpoint;
+
+    return `${profile}:${credential.kind}:${credential.credentialId}:${credential.accountId ?? 'none'}:${endpointType}`;
+  }
+
+  private pushHistory(
+    stats: MutableStats,
+    level: CredentialUsageHistoryEntry['level'],
+    message: string,
+    request?: {
+      readonly apiId?: string;
+      readonly endpointPath?: string;
+      readonly meta?: Record<string, string | number | boolean | null | undefined>;
+    },
+  ): void {
+    const meta = normalizeHistoryMeta(request?.meta);
+
     stats.history.push({
       at: new Date().toISOString(),
       level,
       message,
+      ...(request?.apiId ? { apiId: request.apiId } : {}),
+      ...(request?.endpointPath ? { endpointPath: request.endpointPath } : {}),
+      ...(meta ? { meta } : {}),
     });
 
     if (stats.history.length > MAX_HISTORY_ENTRIES) {
       stats.history.splice(0, stats.history.length - MAX_HISTORY_ENTRIES);
     }
   }
+}
+
+function normalizeHistoryMeta(
+  value: Record<string, string | number | boolean | null | undefined> | undefined,
+): Record<string, string> | undefined {
+  if (!value) return undefined;
+
+  const entries = Object.entries(value).flatMap(([key, raw]) => {
+    if (raw === null || raw === undefined || raw === '') return [];
+
+    return [[key, String(raw)] as const];
+  });
+
+  if (entries.length === 0) return undefined;
+
+  return Object.fromEntries(entries);
 }
 
 function normalizeSymbolList(symbols: readonly string[]): string[] {
@@ -348,4 +558,51 @@ function positiveNumber(value: unknown, fallback: number): number {
   const parsed = Number(value);
 
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function defaultOrigin(kind: CredentialUsageKind): CredentialUsageOrigin {
+  return kind === 'collector' ? 'COLLECTOR_MARKET' : 'EXECUTOR_STRATEGY';
+}
+
+function defaultPriority(kind: CredentialUsageKind): CredentialUsagePriority {
+  return kind === 'collector' ? 'P2' : 'P1';
+}
+
+function defaultActionType(
+  kind: CredentialUsageKind,
+  endpoint: string,
+): CredentialUsageActionType {
+  if (endpoint === 'WS') return 'WS';
+  if (kind === 'collector') return 'MARKET_DATA';
+  if (endpoint === 'REST_ORDER') return 'ORDER';
+  if (endpoint === 'REST_ACCOUNT') return 'STATUS';
+
+  return 'UNKNOWN';
+}
+
+function isBrokerRateLimitError(err: unknown): boolean {
+  const record = err && typeof err === 'object' ? (err as Record<string, unknown>) : {};
+  const details =
+    record.details && typeof record.details === 'object'
+      ? (record.details as Record<string, unknown>)
+      : {};
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  const haystack = [
+    record.code,
+    details.status,
+    details.returnCode,
+    details.returnMsg,
+    message,
+  ]
+    .map((value) => String(value ?? '').toLowerCase())
+    .join(' ');
+
+  return (
+    haystack.includes('rate_limit') ||
+    haystack.includes('rate') ||
+    haystack.includes('limit') ||
+    haystack.includes('429') ||
+    haystack.includes('초과') ||
+    haystack.includes('과다')
+  );
 }

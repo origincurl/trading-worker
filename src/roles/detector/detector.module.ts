@@ -1,7 +1,7 @@
 import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { NotifyModule } from '@external/notify/notify.module';
-import { DETECTOR_STATUS } from '@roles/role-status';
+import { DETECTOR_METRICS, DETECTOR_STATUS } from '@roles/role-status';
 import { AlertRaisedEntity } from './repository/alert-raised.entity';
 import { ALERT_REPOSITORY, AlertRepositoryImpl } from './repository/alert.repository';
 import { AlertEvaluator } from './service/alert-evaluator.service';
@@ -25,8 +25,9 @@ import { EvaluateAlertsUsecase } from './usecase/evaluate-alerts.usecase';
     EvaluateAlertsUsecase,
     AlertEvalScheduler,
     { provide: DETECTOR_STATUS, useExisting: DetectorStatusService },
+    { provide: DETECTOR_METRICS, useExisting: DetectorStatusService },
   ],
-  exports: [DETECTOR_STATUS],
+  exports: [DETECTOR_STATUS, DETECTOR_METRICS],
 })
 export class DetectorModule implements OnApplicationBootstrap {
   private readonly logger = new Logger(DetectorModule.name);

@@ -28,12 +28,16 @@ export type ExecutionDispatchResult =
 const FID = {
   ACCOUNT: '9201',
   ORDER_NO: '9203',
-  ORIGIN_ORDER_NO: '9201',
+  ORDER_STATUS: '913',
+  FILL_NO: '909',
   SYMBOL: '9001',
-  SIDE: '912',
+  SIDE_TEXT: '905',
+  SIDE_CODE: '907',
   EXECUTED_TIME: '908',
   EXECUTED_PRICE: '910',
   EXECUTED_QTY: '911',
+  UNIT_EXECUTED_PRICE: '914',
+  UNIT_EXECUTED_QTY: '915',
 } as const;
 
 export interface ExecutionDispatchContext {
@@ -96,11 +100,26 @@ function parseExecution(
   const vendorOrderId = strField(values[FID.ORDER_NO]);
   const accountId = strField(values[FID.ACCOUNT]);
   const symbol =
-    strField(values[FID.SYMBOL]) ?? (typeof entry.item === 'string' ? entry.item : null);
-  const sideRaw = strField(values[FID.SIDE]);
-  const filledQty = parseSignedNumber(values[FID.EXECUTED_QTY]);
-  const filledPrice = parseSignedNumber(values[FID.EXECUTED_PRICE]);
+    normalizeKiwoomSymbol(strField(values[FID.SYMBOL])) ??
+    (typeof entry.item === 'string' ? normalizeKiwoomSymbol(entry.item) : null);
+  const status = strField(values[FID.ORDER_STATUS]);
+  const sideRaw = strField(values[FID.SIDE_CODE]) ?? strField(values[FID.SIDE_TEXT]);
+  const filledQty =
+    parseSignedNumber(values[FID.EXECUTED_QTY]) ??
+    parseSignedNumber(values[FID.UNIT_EXECUTED_QTY]);
+  const filledPrice =
+    parseSignedNumber(values[FID.EXECUTED_PRICE]) ??
+    parseSignedNumber(values[FID.UNIT_EXECUTED_PRICE]);
   const filledAt = parseHhmmssToDate(values[FID.EXECUTED_TIME], ctx.receivedAt);
+  const fillNo = strField(values[FID.FILL_NO]);
+
+  if (status && !status.includes('체결')) {
+    return { kind: 'ignored', reason: `execution status ${status}` };
+  }
+
+  if (filledQty !== null && Math.abs(filledQty) === 0) {
+    return { kind: 'ignored', reason: 'zero fill quantity' };
+  }
 
   if (!vendorOrderId || !accountId || !symbol || filledQty === null || filledPrice === null) {
     return {
@@ -124,6 +143,16 @@ function parseExecution(
       accountId,
       clientOrderId: '',
       vendorOrderId,
+      externalFillId: [
+        'kiwoom',
+        ctx.marketEnv,
+        accountId,
+        vendorOrderId,
+        fillNo ?? 'no-fill-no',
+        (filledAt ?? ctx.receivedAt).toISOString(),
+        Math.abs(filledQty),
+        Math.abs(filledPrice),
+      ].join(':'),
       symbol,
       side,
       filledQty: Math.abs(filledQty),
@@ -148,7 +177,20 @@ function mapSide(raw: string | null): 'buy' | 'sell' | null {
 
   if (raw === '1' || raw.toLowerCase() === 'sell') return 'sell';
 
+  if (raw.includes('매수')) return 'buy';
+
+  if (raw.includes('매도')) return 'sell';
+
   return null;
+}
+
+function normalizeKiwoomSymbol(value: string | null): string | null {
+  if (!value) return null;
+
+  const trimmed = value.trim();
+  const withoutPrefix = trimmed.startsWith('A') ? trimmed.slice(1) : trimmed;
+
+  return withoutPrefix.length > 0 ? withoutPrefix : null;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

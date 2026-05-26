@@ -6,6 +6,7 @@ import { MarketSnapshotWriter } from '@shared/cache/market-snapshot.writer';
 import type { MarketIndexPayload, MarketIndexSymbol } from '@shared/event/market-index.event';
 
 const INDEX_SYMBOLS: readonly MarketIndexSymbol[] = ['KOSPI', 'KOSDAQ'];
+const WS_FALLBACK_STALE_MS = 90_000;
 
 @Injectable()
 export class MarketIndexSnapshotService {
@@ -19,9 +20,23 @@ export class MarketIndexSnapshotService {
 
   async refresh(): Promise<void> {
     const marketEnv = this.kiwoom.marketEnv === 'production' ? 'production' : 'mock';
+    if (!isKrxContinuousSession(new Date())) {
+      this.logger.debug('market index REST fallback skipped outside KRX continuous session');
+
+      return;
+    }
+
+    const staleSymbols = await this.symbolsNeedingRestFallback(marketEnv);
+
+    if (staleSymbols.length === 0) {
+      this.logger.debug('market index REST fallback skipped; ws_0J snapshots are fresh');
+
+      return;
+    }
+
     const snapshots = await this.gateway.fetchMarketIndexSnapshots({
       marketEnv,
-      symbols: INDEX_SYMBOLS,
+      symbols: staleSymbols,
     });
     const cachedAt = new Date().toISOString();
 
@@ -51,4 +66,40 @@ export class MarketIndexSnapshotService {
         ),
       );
   }
+
+  private async symbolsNeedingRestFallback(marketEnv: 'mock' | 'production'): Promise<MarketIndexSymbol[]> {
+    const now = Date.now();
+    const entries = await Promise.all(
+      INDEX_SYMBOLS.map(async (symbol) => ({
+        symbol,
+        entry: await this.writer.readIndex({
+          provider: 'KIWOOM',
+          marketEnv: marketEnv === 'production' ? 'PRODUCTION' : 'MOCK',
+          symbol,
+        }),
+      })),
+    );
+
+    return entries
+      .filter(({ entry }) => {
+        if (!entry) return true;
+        if (entry.source !== 'ws_0J') return true;
+
+        const cachedAtMs = Date.parse(entry.cachedAt);
+        if (!Number.isFinite(cachedAtMs)) return true;
+
+        return now - cachedAtMs > WS_FALLBACK_STALE_MS;
+      })
+      .map(({ symbol }) => symbol);
+  }
+}
+
+function isKrxContinuousSession(now: Date): boolean {
+  const kst = new Date(now.getTime() + 9 * 60 * 60_000);
+  const day = kst.getUTCDay();
+  if (day === 0 || day === 6) return false;
+
+  const minutes = kst.getUTCHours() * 60 + kst.getUTCMinutes();
+
+  return minutes >= 9 * 60 && minutes <= 15 * 60 + 30;
 }

@@ -1,12 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { NOTIFY_GATEWAY } from '@external/notify/notify.token';
 import type { NotifyVendor } from '@external/notify/vendor/notify.vendor';
-import type { RoleStatus, RoleStatusProvider } from '@roles/role-status';
+import type { RoleMetricProvider, RoleStatus, RoleStatusProvider } from '@roles/role-status';
 import { EvaluateAlertsUsecase } from '@roles/detector/usecase/evaluate-alerts.usecase';
 import { AlertService } from './alert.service';
 
 @Injectable()
-export class DetectorStatusService implements RoleStatusProvider {
+export class DetectorStatusService implements RoleStatusProvider, RoleMetricProvider {
   private readonly bootedAt = Date.now();
 
   constructor(
@@ -15,6 +15,18 @@ export class DetectorStatusService implements RoleStatusProvider {
     private readonly evaluateUsecase: EvaluateAlertsUsecase,
   ) {
     void this._notify;
+  }
+
+  getRoleMetrics() {
+    return {
+      role: 'detector' as const,
+      metrics: {
+        alerts_raised: this.alertService.raisedCount(),
+        dedup_suppressed: this.alertService.suppressedCount(),
+        last_raised_at: this.alertService.lastRaisedAt()?.toISOString() ?? null,
+        last_evaluation_at: this.evaluateUsecase.lastRunAt()?.toISOString() ?? null,
+      },
+    };
   }
 
   getStatus(): RoleStatus {

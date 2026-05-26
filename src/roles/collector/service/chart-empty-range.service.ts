@@ -23,10 +23,24 @@ export class ChartEmptyRangeService {
   ) {}
 
   async recordEmpty(request: ChartCatchupRequest, reason: EmptyReason = 'transient'): Promise<void> {
+    await this.recordEmptyRange(
+      request,
+      request.targetFromIso ?? request.fromIso,
+      request.targetToIso ?? request.toIso,
+      reason,
+    );
+  }
+
+  async recordEmptyRange(
+    request: ChartCatchupRequest,
+    fromIso: string,
+    toIso: string,
+    reason: EmptyReason = 'transient',
+  ): Promise<void> {
     await this.ensureTable();
 
-    const from = new Date(request.fromIso);
-    const to = new Date(request.toIso);
+    const from = new Date(fromIso);
+    const to = new Date(toIso);
     const ttlUntil = new Date(Date.now() + this.ttlMsFor(reason));
 
     try {
@@ -54,7 +68,7 @@ export class ChartEmptyRangeService {
           request.marketEnv.toUpperCase(),
           request.symbol,
           request.intervalType.toUpperCase(),
-          request.chartMarket ?? 'KRW',
+          request.chartMarket ?? (request.marketEnv === 'production' ? 'AL' : 'KRW'),
           from,
           to,
           reason,

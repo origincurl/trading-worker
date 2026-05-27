@@ -6,6 +6,7 @@ import {
   type DispatchResult,
 } from '@roles/collector/mapper/kiwoom-tick.event-mapper';
 import { DeadLetterService } from '@roles/collector/service/dead-letter.service';
+import { MarketDashboardSnapshotService } from '@roles/collector/service/market-dashboard-snapshot.service';
 import { MarketIndexSnapshotService } from '@roles/collector/service/market-index-snapshot.service';
 import { MarketOrderbookService } from '@roles/collector/service/market-orderbook.service';
 import { MarketTickService } from '@roles/collector/service/market-tick.service';
@@ -16,6 +17,7 @@ interface IngestStats {
   ticks: number;
   orderbooks: number;
   marketIndexes: number;
+  marketBreadths: number;
   ignored: number;
   deadLetters: number;
   parseWarnings: number;
@@ -28,6 +30,7 @@ export class IngestTickUsecase {
     ticks: 0,
     orderbooks: 0,
     marketIndexes: 0,
+    marketBreadths: 0,
     ignored: 0,
     deadLetters: 0,
     parseWarnings: 0,
@@ -38,6 +41,7 @@ export class IngestTickUsecase {
     private readonly tickService: MarketTickService,
     private readonly orderbookService: MarketOrderbookService,
     private readonly marketIndexService: MarketIndexSnapshotService,
+    private readonly marketDashboardService: MarketDashboardSnapshotService,
     private readonly deadLetter: DeadLetterService,
     private readonly refreshUniverse: RefreshUniverseUsecase,
   ) {}
@@ -93,6 +97,13 @@ export class IngestTickUsecase {
         this.stats.marketIndexes += 1;
 
         await this.marketIndexService.recordRealtime(result.marketIndex);
+
+        return;
+
+      case 'market-breadth':
+        this.stats.marketBreadths += 1;
+
+        await this.marketDashboardService.recordBreadth(result.marketBreadth);
 
         return;
 

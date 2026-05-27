@@ -5,6 +5,10 @@ import type {
   MarketCandleClosedPayload,
 } from '@shared/event/market-candle-closed.event';
 import type { MarketIndexPayload, MarketIndexSymbol } from '@shared/event/market-index.event';
+import type {
+  DashboardMarketFlowPayload,
+  DashboardMarketMoverPayload,
+} from '@shared/event/market-dashboard.event';
 
 export interface GetAccountBalanceInput {
   readonly accountId: string;
@@ -40,7 +44,7 @@ export interface ModifyOrderInput {
 // Phase 6: real-time market data subscription. Collector-only — the
 // executor profile gateway throws on these methods (rate budgets must stay
 // separate; collector ws bandwidth cannot bleed into order ack latency).
-export type MarketDataFrameKind = 'trade-tick' | 'orderbook' | 'market-index';
+export type MarketDataFrameKind = 'trade-tick' | 'orderbook' | 'market-index' | 'market-breadth';
 
 export interface SubscribeMarketDataInput {
   readonly symbols: readonly string[];
@@ -98,6 +102,15 @@ export interface FetchMarketIndexSnapshotsInput {
 
 export type MarketIndexSnapshot = MarketIndexPayload;
 
+export interface FetchDashboardMarketFlowsInput {
+  readonly marketEnv: 'mock' | 'production';
+}
+
+export interface FetchDashboardMarketMoversInput {
+  readonly marketEnv: 'mock' | 'production';
+  readonly limit?: number;
+}
+
 export interface BrokerageVendor {
   // collector-facing read paths
   getAccountBalance(input: GetAccountBalanceInput): Promise<AccountBalanceModel>;
@@ -117,6 +130,15 @@ export interface BrokerageVendor {
   fetchMarketIndexSnapshots(
     input: FetchMarketIndexSnapshotsInput,
   ): Promise<MarketIndexSnapshot[]>;
+  fetchDashboardMarketFlows(
+    input: FetchDashboardMarketFlowsInput,
+  ): Promise<DashboardMarketFlowPayload[]>;
+  fetchDashboardMarketMovers(input: FetchDashboardMarketMoversInput): Promise<{
+    topTradingValue: DashboardMarketMoverPayload[];
+    topVolume: DashboardMarketMoverPayload[];
+    gainers: DashboardMarketMoverPayload[];
+    losers: DashboardMarketMoverPayload[];
+  }>;
 
   // executor-facing write paths
   placeOrder(input: PlaceOrderInput): Promise<OrderAckModel>;

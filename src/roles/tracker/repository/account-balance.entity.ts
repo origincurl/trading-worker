@@ -1,6 +1,7 @@
 import { Column, Entity, Index, Unique } from 'typeorm';
 import { BaseEntity } from '@shared/persistence/base.entity';
 import type {
+  AccountBalanceCashDetails,
   AccountBalanceModel,
   AccountBalanceBrokerage,
   AccountBalanceMarketEnv,
@@ -36,6 +37,9 @@ export class AccountBalanceEntity extends BaseEntity {
   @Column({ name: 'total_asset', type: 'numeric', precision: 24, scale: 6, nullable: true })
   totalAsset!: number | null;
 
+  @Column({ name: 'cash_details', type: 'jsonb', nullable: true })
+  cashDetails!: AccountBalanceCashDetails | null;
+
   @Column({ name: 'synced_at', type: 'timestamptz', nullable: true })
   syncedAt!: Date | null;
 
@@ -48,6 +52,7 @@ export class AccountBalanceEntity extends BaseEntity {
       cashBalance: Number(this.cashBalance),
       availableCash: this.availableCash !== null ? Number(this.availableCash) : null,
       totalAsset: this.totalAsset !== null ? Number(this.totalAsset) : null,
+      cashDetails: this.cashDetails ?? null,
       syncedAt: this.syncedAt ? this.syncedAt.toISOString() : null,
     };
   }

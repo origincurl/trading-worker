@@ -64,6 +64,7 @@ export class AccountBalanceService {
         cashBalance: vendor.cash,
         availableCash: vendor.buyingPower,
         totalAsset: vendor.equityValue,
+        cashDetails: vendor.cashDetails,
         syncedAt: new Date(),
       });
 

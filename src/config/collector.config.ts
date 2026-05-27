@@ -55,6 +55,12 @@ export class CollectorConfigDto {
   COLLECTOR_FX_INTERVAL_SEC: number = 300;
 
   @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(30)
+  COLLECTOR_DASHBOARD_INTERVAL_SEC: number = 30;
+
+  @IsOptional()
   @IsString()
   @IsUrl({ require_tld: true, protocols: ['https'] })
   COLLECTOR_FX_LATEST_URL: string = 'https://cdn.moneyconvert.net/api/latest.json';
@@ -67,6 +73,7 @@ export interface CollectorConfig {
   readonly marketSnapshotEnabled: boolean;
   readonly indexIntervalSec: number;
   readonly fxIntervalSec: number;
+  readonly dashboardIntervalSec: number;
   readonly fxLatestUrl: string;
 }
 
@@ -80,6 +87,7 @@ export function loadCollectorConfig(env: NodeJS.ProcessEnv): CollectorConfig {
       COLLECTOR_MARKET_SNAPSHOT_ENABLED: env.COLLECTOR_MARKET_SNAPSHOT_ENABLED,
       COLLECTOR_INDEX_INTERVAL_SEC: env.COLLECTOR_INDEX_INTERVAL_SEC,
       COLLECTOR_FX_INTERVAL_SEC: env.COLLECTOR_FX_INTERVAL_SEC,
+      COLLECTOR_DASHBOARD_INTERVAL_SEC: env.COLLECTOR_DASHBOARD_INTERVAL_SEC,
       COLLECTOR_FX_LATEST_URL: env.COLLECTOR_FX_LATEST_URL,
     },
     { exposeDefaultValues: true },
@@ -100,6 +108,7 @@ export function loadCollectorConfig(env: NodeJS.ProcessEnv): CollectorConfig {
     marketSnapshotEnabled: dto.COLLECTOR_MARKET_SNAPSHOT_ENABLED,
     indexIntervalSec: dto.COLLECTOR_INDEX_INTERVAL_SEC,
     fxIntervalSec: dto.COLLECTOR_FX_INTERVAL_SEC,
+    dashboardIntervalSec: dto.COLLECTOR_DASHBOARD_INTERVAL_SEC,
     fxLatestUrl: dto.COLLECTOR_FX_LATEST_URL,
   };
 }

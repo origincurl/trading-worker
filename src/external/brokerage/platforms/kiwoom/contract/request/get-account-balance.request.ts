@@ -3,5 +3,5 @@
 // vendors/kiwoom (architecture.md §6 contract rule).
 export interface GetAccountBalanceRequestContract {
   readonly acntNo: string;
-  readonly qry_tp: '1';
+  readonly qry_tp: '2' | '3';
 }

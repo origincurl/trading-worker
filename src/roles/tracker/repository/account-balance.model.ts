@@ -10,6 +10,28 @@
 export type AccountBalanceBrokerage = string;
 export type AccountBalanceMarketEnv = 'mock' | 'production';
 
+export interface AccountBalanceCashDetails {
+  readonly withdrawalAvailable: number | null;
+  readonly orderAvailable: number | null;
+  readonly d1EstimatedDeposit: number | null;
+  readonly d1SettlementAmount: number | null;
+  readonly d1BuySettlementAmount: number | null;
+  readonly d1SellSettlementAmount: number | null;
+  readonly d1RepaymentRequired: number | null;
+  readonly d1WithdrawalAvailable: number | null;
+  readonly d2EstimatedDeposit: number | null;
+  readonly d2SettlementAmount: number | null;
+  readonly d2BuySettlementAmount: number | null;
+  readonly d2SellSettlementAmount: number | null;
+  readonly d2RepaymentRequired: number | null;
+  readonly d2WithdrawalAvailable: number | null;
+  readonly receivableCash: number | null;
+  readonly receivableCashTotal: number | null;
+  readonly substituteValue: number | null;
+  readonly remainingSubstituteValue: number | null;
+  readonly entrustedSubstituteValue: number | null;
+}
+
 export interface AccountBalanceModel {
   readonly accountExternalId: string;
   readonly brokerage: AccountBalanceBrokerage;
@@ -18,5 +40,6 @@ export interface AccountBalanceModel {
   readonly cashBalance: number;
   readonly availableCash: number | null;
   readonly totalAsset: number | null;
+  readonly cashDetails: AccountBalanceCashDetails | null;
   readonly syncedAt: string | null;
 }

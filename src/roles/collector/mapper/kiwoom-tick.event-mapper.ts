@@ -2,6 +2,12 @@ import { parseSignedNumber } from '@common/util/kiwoom-number-parse';
 import { parseHhmmssToDate } from '@common/util/kiwoom-time-parse';
 import type { KiwoomMarketEnv } from '@config/kiwoom.config';
 import type { MarketIndexPayload } from '@shared/event/market-index.event';
+import {
+  DASHBOARD_MARKET_KIWOOM_CODES,
+  DASHBOARD_MARKET_NAMES,
+  type DashboardMarketBreadthPayload,
+  type DashboardMarketCode,
+} from '@shared/event/market-dashboard.event';
 import type { MarketOrderbookPayload } from '@shared/event/market-orderbook.event';
 import type { MarketTickPayload } from '@shared/event/market-tick.event';
 import { parseMarketIndex0J } from './kiwoom-market-index.event-mapper';
@@ -25,6 +31,7 @@ export type DispatchResult =
   | { kind: 'tick'; tick: MarketTickPayload }
   | { kind: 'orderbook'; orderbook: MarketOrderbookPayload }
   | { kind: 'market-index'; marketIndex: MarketIndexPayload }
+  | { kind: 'market-breadth'; marketBreadth: DashboardMarketBreadthPayload }
   | { kind: 'ignored'; reason: string }
   | { kind: 'dead-letter'; realtimeType: string | null; symbol: string | null; reason: string };
 
@@ -119,6 +126,9 @@ function dispatchEntry(entry: KiwoomRealEntry, ctx: DispatchContext): DispatchRe
         : result;
     }
 
+    case '0U':
+      return parseMarketBreadth0U(entry, ctx);
+
     default:
       return {
         kind: 'dead-letter',
@@ -130,6 +140,81 @@ function dispatchEntry(entry: KiwoomRealEntry, ctx: DispatchContext): DispatchRe
             : `unsupported realtime type ${realtimeType}`,
       };
   }
+}
+
+
+function parseMarketBreadth0U(entry: KiwoomRealEntry, ctx: DispatchContext): DispatchResult {
+  const item = typeof entry.item === 'string' && entry.item.length > 0 ? entry.item : null;
+  const marketCode = marketCodeFromKiwoomItem(item);
+
+  if (!item || !marketCode) {
+    return {
+      kind: 'dead-letter',
+      realtimeType: '0U',
+      symbol: item,
+      reason: 'unsupported or missing market breadth item',
+    };
+  }
+
+  if (!isStringRecord(entry.values)) {
+    return {
+      kind: 'dead-letter',
+      realtimeType: '0U',
+      symbol: item,
+      reason: 'values not a string record',
+    };
+  }
+
+  const values = entry.values;
+  const risingCount = parsePositiveInt(values['252']);
+  const upperLimitCount = parsePositiveInt(values['251']);
+  const flatCount = parsePositiveInt(values['253']);
+  const fallingCount = parsePositiveInt(values['255']);
+  const lowerLimitCount = parsePositiveInt(values['254']);
+  const tradedCount = parsePositiveInt(values['256']);
+  const tradedRatio = parseNumberOrZero(values['257']);
+
+  return {
+    kind: 'market-breadth',
+    marketBreadth: {
+      provider: 'KIWOOM',
+      marketEnv: ctx.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK',
+      market: DASHBOARD_MARKET_NAMES[marketCode],
+      marketCode,
+      risingCount,
+      upperLimitCount,
+      flatCount,
+      fallingCount,
+      lowerLimitCount,
+      tradedCount,
+      tradedRatio,
+      advanceDeclineRatio: risingCount / Math.max(fallingCount, 1),
+      source: '0U',
+      updatedAt: ctx.receivedAt.toISOString(),
+    },
+  };
+}
+
+function marketCodeFromKiwoomItem(item: string | null): DashboardMarketCode | null {
+  if (!item) return null;
+
+  for (const [marketCode, kiwoomCode] of Object.entries(DASHBOARD_MARKET_KIWOOM_CODES)) {
+    if (item === kiwoomCode) return marketCode as DashboardMarketCode;
+  }
+
+  return null;
+}
+
+function parsePositiveInt(value: unknown): number {
+  const n = parseSignedNumber(value);
+
+  return n === null || !Number.isFinite(n) ? 0 : Math.max(0, Math.round(Math.abs(n)));
+}
+
+function parseNumberOrZero(value: unknown): number {
+  const n = parseSignedNumber(value);
+
+  return n === null || !Number.isFinite(n) ? 0 : n;
 }
 
 export function parseTradeTick0B(entry: KiwoomRealEntry, ctx: DispatchContext): DispatchResult {

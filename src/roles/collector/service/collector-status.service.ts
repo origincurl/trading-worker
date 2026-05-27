@@ -36,7 +36,9 @@ export class CollectorStatusService implements RoleStatusProvider, RoleMetricPro
       universe_size: this.universe.size(),
       observed_fe_count: this.universe.observedFeCount(),
       strategy_desired_count: this.universe.strategyDemandCount(),
+      position_desired_count: this.universe.positionDemandCount(),
       active_subscriptions: this.refreshUniverse.actualSubscriptionCount(),
+      market_breadths: this.ingestUsecase.snapshotStats().marketBreadths,
       ws_connected: this.subscriber.isConnected(),
     };
   }
@@ -63,6 +65,7 @@ export class CollectorStatusService implements RoleStatusProvider, RoleMetricPro
     const universeSize = this.universe.size();
     const feCount = this.universe.observedFeCount();
     const strategyCount = this.universe.strategyDemandCount();
+    const positionCount = this.universe.positionDemandCount();
     const lastRefresh = this.refreshUniverse.lastRefreshAt();
 
     const rejections = Array.from(this.candleBuilder.rejectionCounts())
@@ -71,13 +74,14 @@ export class CollectorStatusService implements RoleStatusProvider, RoleMetricPro
 
     const detail =
       `subscribed=${subscribed} ticks=${stats.ticks} orderbooks=${stats.orderbooks} ` +
-      `marketIndexes=${stats.marketIndexes} ` +
+      `marketIndexes=${stats.marketIndexes} marketBreadths=${stats.marketBreadths} ` +
       `openBuckets=${openBuckets} closedCandles=${this.candleClose.closedCount()} ` +
       `deadLetters=${stats.deadLetters} parseWarnings=${stats.parseWarnings} ` +
       `rejections=[${rejections}] ` +
       `lastTickAt=${last?.toISOString() ?? 'never'} lastObAt=${lastOb?.toISOString() ?? 'never'} ` +
       `lastCloseAt=${lastClose?.toISOString() ?? 'never'} ` +
       `universeSize=${universeSize} observedFe=${feCount} strategyDesired=${strategyCount} ` +
+      `positionDesired=${positionCount} ` +
       `universeRefreshOk=${this.refreshUniverse.lastRefreshOk()} ` +
       `lastUniverseRefreshAt=${lastRefresh?.toISOString() ?? 'never'} ` +
       `wsConnected=${this.subscriber.isConnected()} uptime=${Math.floor((Date.now() - this.bootedAt) / 1000)}s`;

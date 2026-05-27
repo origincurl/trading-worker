@@ -15,6 +15,8 @@ import type {
   BrokerageVendor,
   CancelOrderInput,
   FetchChartCandlesInput,
+  FetchDashboardMarketFlowsInput,
+  FetchDashboardMarketMoversInput,
   FetchMarketIndexSnapshotsInput,
   GetAccountBalanceInput,
   GetPositionsInput,
@@ -58,6 +60,14 @@ import {
   type KiwoomTokenSupplier,
 } from './kiwoom.api-client';
 import type { KiwoomWsClient } from './kiwoom-ws.client';
+import {
+  DASHBOARD_MARKET_CODES,
+  DASHBOARD_MARKET_KIWOOM_CODES,
+  DASHBOARD_MARKET_NAMES,
+  type DashboardMarketCode,
+  type DashboardMarketFlowPayload,
+  type DashboardMarketMoverPayload,
+} from '@shared/event/market-dashboard.event';
 import type {
   CredentialUsageContext,
   CredentialUsageService,
@@ -111,7 +121,9 @@ const PATH_ORDER = '/api/dostk/ordr';
 const PATH_ACCOUNT = '/api/dostk/acnt';
 const PATH_CHART = '/api/dostk/chart';
 const PATH_SECTOR = '/api/dostk/sect';
+const PATH_MARKET_CONDITION = '/api/dostk/mrkcond';
 const PATH_STOCK_INFO = '/api/dostk/stkinfo';
+const PATH_RANKING_INFO = '/api/dostk/rkinfo';
 
 // apiId catalogue. Public Kiwoom REST values; flagged with TODO comments
 // where the mapping is uncertain.
@@ -125,6 +137,11 @@ const APIID_CHART_MINUTE = 'ka10080';
 const APIID_CHART_DAILY = 'ka10081';
 const APIID_STOCK_MASTER = 'ka10099';
 const APIID_INDEX_CURRENT = 'ka20001';
+const APIID_SECTOR_INVESTOR_NET_BUY = 'ka10051';
+const APIID_PRICE_SURGE_DROP = 'ka10019';
+const APIID_PREV_CLOSE_MOVER_RANK = 'ka10027';
+const APIID_TODAY_VOLUME_RANK = 'ka10030';
+const APIID_TRADING_VALUE_RANK = 'ka10032';
 
 // Phase 6 market-data stream (collector-only) + Phase 6.8 auto-reconnect.
 // Phase 8: REST order paths and chart/master read paths wired against
@@ -194,7 +211,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     try {
       const body: GetAccountBalanceRequestContract = {
         acntNo: input.accountId,
-        qry_tp: '1',
+        qry_tp: '3',
       };
 
       const response = await this.opts.apiClient.request<
@@ -214,16 +231,39 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
       });
 
       const cash = parseNumberOr0(response.entr);
+      const orderAvailable = parseNumberOrNull(response.ord_alow_amt);
+      const withdrawalAvailable = parseNumberOrNull(response.pymn_alow_amt);
 
       return {
         accountId: response.acntNo ?? input.accountId,
         currency: 'KRW',
         cash,
-        buyingPower: parseNumberOr0(response.ord_alow_amt ?? response.pymn_alow_amt),
+        buyingPower: orderAvailable ?? withdrawalAvailable ?? 0,
         // kt00001 is a deposit detail API. It does not include mark-to-market
         // portfolio value, so persist cash here and let API composition add the
         // latest position snapshot for the trading summary.
         equityValue: cash,
+        cashDetails: {
+          withdrawalAvailable,
+          orderAvailable,
+          d1EstimatedDeposit: parseNumberOrNull(response.d1_entra),
+          d1SettlementAmount: parseNumberOrNull(response.d1_slby_exct_amt),
+          d1BuySettlementAmount: parseNumberOrNull(response.d1_buy_exct_amt),
+          d1SellSettlementAmount: parseNumberOrNull(response.d1_sel_exct_amt),
+          d1RepaymentRequired: parseNumberOrNull(response.d1_out_rep_mor),
+          d1WithdrawalAvailable: parseNumberOrNull(response.d1_pymn_alow_amt),
+          d2EstimatedDeposit: parseNumberOrNull(response.d2_entra),
+          d2SettlementAmount: parseNumberOrNull(response.d2_slby_exct_amt),
+          d2BuySettlementAmount: parseNumberOrNull(response.d2_buy_exct_amt),
+          d2SellSettlementAmount: parseNumberOrNull(response.d2_sel_exct_amt),
+          d2RepaymentRequired: parseNumberOrNull(response.d2_out_rep_mor),
+          d2WithdrawalAvailable: parseNumberOrNull(response.d2_pymn_alow_amt),
+          receivableCash: parseNumberOrNull(response.ch_uncla),
+          receivableCashTotal: parseNumberOrNull(response.ch_uncla_tot),
+          substituteValue: parseNumberOrNull(response.repl_amt),
+          remainingSubstituteValue: parseNumberOrNull(response.remn_repl_evlta),
+          entrustedSubstituteValue: parseNumberOrNull(response.trst_remn_repl_evlta),
+        },
         snapshotAt: new Date().toISOString(),
       };
     } catch (err) {
@@ -635,6 +675,252 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
     }
 
     return out;
+  }
+
+  async fetchDashboardMarketFlows(
+    input: FetchDashboardMarketFlowsInput,
+  ): Promise<DashboardMarketFlowPayload[]> {
+    const marketEnv = input.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK';
+    const baseDt = yyyymmddKst(new Date());
+    const updatedAt = new Date().toISOString();
+    const out: DashboardMarketFlowPayload[] = [];
+
+    for (const marketCode of DASHBOARD_MARKET_CODES) {
+      try {
+        const response = await this.opts.apiClient.request<Record<string, string>, Record<string, unknown>>({
+          apiId: APIID_SECTOR_INVESTOR_NET_BUY,
+          endpointPath: PATH_SECTOR,
+          body: {
+            mrkt_tp: marketCode === 'KOSPI' ? '0' : '1',
+            amt_qty_tp: '0',
+            base_dt: baseDt,
+            stex_tp: '1',
+          },
+          usage: {
+            origin: 'COLLECTOR_MARKET',
+            priority: 'P2',
+            actionType: 'MARKET_DATA',
+            endpointType: 'REST_MARKET_STATS',
+          },
+        });
+        const row = pickMarketFlowRow(response, marketCode);
+        if (!row) {
+          this.logger.warn(`fetchDashboardMarketFlows market=${marketCode} returned no parseable ka10051 row`);
+
+          continue;
+        }
+
+        const foreignNetBuyRaw = pickValue(row, ['frgnr_netprps', 'frgn_netprps', 'frgnr']);
+        const institutionNetBuyRaw = pickValue(row, ['orgn_netprps', 'inst_netprps', 'orgn']);
+        const individualNetBuyRaw = pickValue(row, ['ind_netprps', 'indv_netprps', 'ind_invsr']);
+        const foreignNetBuy = parseSignedNumberStrict(foreignNetBuyRaw);
+        const institutionNetBuy = parseSignedNumberStrict(institutionNetBuyRaw);
+        const individualNetBuy = parseSignedNumberStrict(individualNetBuyRaw);
+
+        if (
+          foreignNetBuy === null ||
+          institutionNetBuy === null ||
+          individualNetBuy === null
+        ) {
+          this.logger.warn(`fetchDashboardMarketFlows market=${marketCode} row missing net-buy fields`);
+
+          continue;
+        }
+
+        out.push({
+          provider: 'KIWOOM',
+          marketEnv,
+          market: DASHBOARD_MARKET_NAMES[marketCode],
+          marketCode,
+          foreignNetBuy,
+          foreignBuy: Math.max(foreignNetBuy, 0),
+          foreignSell: Math.max(-foreignNetBuy, 0),
+          institutionNetBuy,
+          institutionBuy: Math.max(institutionNetBuy, 0),
+          institutionSell: Math.max(-institutionNetBuy, 0),
+          individualNetBuy,
+          individualBuy: Math.max(individualNetBuy, 0),
+          individualSell: Math.max(-individualNetBuy, 0),
+          source: 'ka10051',
+          unit: 'KRW_MILLION',
+          updatedAt,
+        });
+      } catch (err) {
+        this.logger.warn(
+          `fetchDashboardMarketFlows market=${marketCode} failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    return out;
+  }
+
+  async fetchDashboardMarketMovers(input: FetchDashboardMarketMoversInput): Promise<{
+    topTradingValue: DashboardMarketMoverPayload[];
+    topVolume: DashboardMarketMoverPayload[];
+    gainers: DashboardMarketMoverPayload[];
+    losers: DashboardMarketMoverPayload[];
+  }> {
+    const marketEnv = input.marketEnv === 'production' ? 'PRODUCTION' : 'MOCK';
+    const limit = Math.max(1, Math.min(input.limit ?? 10, 20));
+    const [topTradingValue, topVolume, gainers, losers] = await Promise.all([
+      this.fetchDashboardRanking({ marketEnv, rank: 'tradingValue', limit }),
+      this.fetchDashboardRanking({ marketEnv, rank: 'volume', limit }),
+      this.fetchDashboardMoverSide({ marketEnv, side: 'gainers', limit }),
+      this.fetchDashboardMoverSide({ marketEnv, side: 'losers', limit }),
+    ]);
+
+    return { topTradingValue, topVolume, gainers, losers };
+  }
+
+  private async fetchDashboardRanking(input: {
+    marketEnv: 'MOCK' | 'PRODUCTION';
+    rank: 'tradingValue' | 'volume';
+    limit: number;
+  }): Promise<DashboardMarketMoverPayload[]> {
+    const apiId = input.rank === 'tradingValue' ? APIID_TRADING_VALUE_RANK : APIID_TODAY_VOLUME_RANK;
+    const source = input.rank === 'tradingValue' ? 'ka10032' : 'ka10030';
+    const reason = input.rank === 'tradingValue' ? '거래대금 상위' : '거래량 상위';
+    const updatedAt = new Date().toISOString();
+
+    try {
+      const response = await this.opts.apiClient.request<Record<string, string>, Record<string, unknown>>({
+        apiId,
+        endpointPath: PATH_RANKING_INFO,
+        body: {
+          mrkt_tp: '000',
+          sort_tp: '1',
+          mang_stk_incls: '0',
+          crd_cnd: '0',
+          crd_tp: '0',
+          trde_qty_tp: '0',
+          trde_prica_tp: '0',
+          trde_prica_cnd: '0',
+          pric_cnd: '0',
+          pric_tp: '0',
+          mrkt_open_tp: '000',
+          stk_cnd: '0',
+          stex_tp: '1',
+        },
+        usage: {
+          origin: 'COLLECTOR_MARKET',
+          priority: 'P2',
+          actionType: 'MARKET_DATA',
+          endpointType: 'REST_MARKET_STATS',
+        },
+      });
+
+      return sortMoverRows(mapMoverRows(response, input.marketEnv, source, reason, updatedAt), input.rank).slice(
+        0,
+        input.limit,
+      );
+    } catch (err) {
+      this.logger.warn(
+        `fetchDashboardRanking ${apiId} rank=${input.rank} failed: ${err instanceof Error ? err.message : err}`,
+      );
+
+      return [];
+    }
+  }
+
+  private async fetchDashboardMoverSide(input: {
+    marketEnv: 'MOCK' | 'PRODUCTION';
+    side: 'gainers' | 'losers';
+    limit: number;
+  }): Promise<DashboardMarketMoverPayload[]> {
+    const fluTp = input.side === 'gainers' ? '1' : '2';
+    const sortTp = input.side === 'gainers' ? '1' : '3';
+    const updatedAt = new Date().toISOString();
+    const updatedRows: DashboardMarketMoverPayload[] = [];
+
+    try {
+      const response = await this.opts.apiClient.request<Record<string, string>, Record<string, unknown>>({
+        apiId: APIID_PRICE_SURGE_DROP,
+        endpointPath: PATH_STOCK_INFO,
+        body: {
+          mrkt_tp: '000',
+          flu_tp: fluTp,
+          tm_tp: '1',
+          tm: '30',
+          trde_qty_tp: '00000',
+          stk_cnd: '0',
+          crd_cnd: '0',
+          pric_cnd: '0',
+          updown_incls: '1',
+          stex_tp: '1',
+        },
+        usage: {
+          origin: 'COLLECTOR_MARKET',
+          priority: 'P2',
+          actionType: 'MARKET_DATA',
+          endpointType: 'REST_MARKET_STATS',
+        },
+      });
+      updatedRows.push(
+        ...filterMoverSide(
+          mapMoverRows(response, input.marketEnv, 'ka10019', input.side === 'gainers' ? '가격 급등' : '가격 급락', updatedAt),
+          input.side,
+        ),
+      );
+    } catch (err) {
+      this.logger.warn(
+        `fetchDashboardMoverSide ka10019 side=${input.side} failed: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+
+    if (updatedRows.length < input.limit) {
+      try {
+        const response = await this.opts.apiClient.request<Record<string, string>, Record<string, unknown>>({
+          apiId: APIID_PREV_CLOSE_MOVER_RANK,
+          endpointPath: PATH_RANKING_INFO,
+          body: {
+            mrkt_tp: '000',
+            sort_tp: sortTp,
+            trde_qty_cnd: '00000',
+            stk_cnd: '0',
+            crd_cnd: '0',
+            updown_incls: '1',
+            pric_cnd: '0',
+            trde_prica_cnd: '0',
+            stex_tp: '1',
+          },
+          usage: {
+            origin: 'COLLECTOR_MARKET',
+            priority: 'P2',
+            actionType: 'MARKET_DATA',
+            endpointType: 'REST_MARKET_STATS',
+          },
+        });
+        updatedRows.push(
+          ...filterMoverSide(
+            mapMoverRows(
+              response,
+              input.marketEnv,
+              'ka10027',
+              input.side === 'gainers' ? '전일대비 상승률 상위' : '전일대비 하락률 상위',
+              updatedAt,
+            ),
+            input.side,
+          ),
+        );
+      } catch (err) {
+        this.logger.warn(
+          `fetchDashboardMoverSide ka10027 side=${input.side} failed: ${err instanceof Error ? err.message : err}`,
+        );
+      }
+    }
+
+    const seen = new Set<string>();
+    return updatedRows
+      .filter((row) => {
+        if (seen.has(row.code)) return false;
+        seen.add(row.code);
+        return true;
+      })
+      .sort((a, b) =>
+        input.side === 'gainers' ? b.changeRate - a.changeRate : a.changeRate - b.changeRate,
+      )
+      .slice(0, input.limit);
   }
 
   async connectMarketDataStream(handler: MarketDataFrameHandler): Promise<void> {
@@ -1317,6 +1603,7 @@ const KIND_TO_REALTIME_TYPE: Record<MarketDataFrameKind, string> = {
   'trade-tick': '0B',
   orderbook: '0D',
   'market-index': '0J',
+  'market-breadth': '0U',
 };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -1372,11 +1659,15 @@ function sleep(ms: number): Promise<void> {
 }
 
 function parseNumberOr0(input: string | number | undefined | null): number {
-  if (input === null || input === undefined) return 0;
+  return parseNumberOrNull(input) ?? 0;
+}
+
+function parseNumberOrNull(input: string | number | undefined | null): number | null {
+  if (input === null || input === undefined || input === '') return null;
 
   const n = typeof input === 'number' ? input : parseFloat(input);
 
-  return Number.isFinite(n) ? n : 0;
+  return Number.isFinite(n) ? n : null;
 }
 
 function normalizeKiwoomSymbol(value: string): string {
@@ -1428,6 +1719,146 @@ function normalizeIndexResponse(
     candidates.find(Boolean) ??
     response
   );
+}
+
+
+function pickMarketFlowRow(
+  response: Record<string, unknown>,
+  marketCode: DashboardMarketCode,
+): Record<string, unknown> | null {
+  const rows = arrayObjects(response.inds_netprps)
+    .concat(arrayObjects(response.output))
+    .concat(arrayObjects(response.list));
+  const kiwoomCode = DASHBOARD_MARKET_KIWOOM_CODES[marketCode];
+
+  return (
+    rows.find(
+      (row) =>
+        pickString(row, ['inds_cd', 'ind_cd', 'mrkt_tp']) === kiwoomCode ||
+        pickString(row, ['inds_nm', 'ind_nm', 'mrkt_nm']) === DASHBOARD_MARKET_NAMES[marketCode],
+    ) ?? null
+  );
+}
+
+
+function filterMoverSide(
+  rows: DashboardMarketMoverPayload[],
+  side: 'gainers' | 'losers',
+): DashboardMarketMoverPayload[] {
+  return rows.filter((row) => (side === 'gainers' ? row.changeRate > 0 : row.changeRate < 0));
+}
+
+function mapMoverRows(
+  response: Record<string, unknown>,
+  marketEnv: 'MOCK' | 'PRODUCTION',
+  source: 'ka10019' | 'ka10027' | 'ka10030' | 'ka10032',
+  reason: string,
+  updatedAt: string,
+): DashboardMarketMoverPayload[] {
+  const rows = uniqueRowObjects(
+    arrayObjects(response.pric_jmpflu)
+      .concat(arrayObjects(response.pred_pre_flu_rt_upper))
+      .concat(arrayObjects(response.today_trde_qty_upper))
+      .concat(arrayObjects(response.tdy_trde_qty_upper))
+      .concat(arrayObjects(response.trde_prica_upper))
+      .concat(arrayObjects(response.trde_qty_upper))
+      .concat(arrayObjects(response.trde_qty_rank))
+      .concat(arrayObjects(response.output))
+      .concat(arrayObjects(response.output1))
+      .concat(arrayObjects(response.output2))
+      .concat(arrayObjects(response.list))
+      .concat(arrayObjects(response.data))
+      .concat(firstArrayObjectRows(response)),
+  );
+
+  const mapped: Array<DashboardMarketMoverPayload | null> = rows
+    .map((row) => {
+      const code = normalizeKiwoomSymbol(
+        pickString(row, ['stk_cd', 'stk_code', 'code', 'symbol']) ?? '',
+      );
+      const name = pickString(row, ['stk_nm', 'stk_name', 'name']) ?? code;
+      const currentPrice = parseSignedNumberAbs(pickValue(row, ['cur_prc', 'now_pric', 'price'])) ?? 0;
+      const change = parseSignedNumberStrict(pickValue(row, ['pred_pre', 'pre', 'change'])) ?? 0;
+      const changeRate = parseSignedNumberStrict(pickValue(row, ['flu_rt', 'change_rt', 'jmp_rt'])) ?? 0;
+      const volume = parseSignedNumberAbs(pickValue(row, ['trde_qty', 'acc_trde_qty', 'volume'])) ?? 0;
+      let tradingValue = parseSignedNumberAbs(
+        pickValue(row, ['trde_prica', 'trde_amt', 'trade_amt', 'trde_pric', 'acc_trde_prica', 'trade_value']),
+      ) ?? 0;
+
+      if (!code || !name || currentPrice <= 0) return null;
+
+      if (tradingValue <= 0 && volume > 0) {
+        tradingValue = Math.round((currentPrice * volume) / 1_000_000);
+      }
+
+      return {
+        provider: 'KIWOOM' as const,
+        marketEnv,
+        code,
+        name,
+        currentPrice,
+        change,
+        changeRate,
+        volume,
+        tradingValue,
+        source,
+        reason,
+        updatedAt,
+      };
+    });
+
+  return mapped.filter((row): row is DashboardMarketMoverPayload => row !== null);
+}
+
+
+
+function sortMoverRows(
+  rows: DashboardMarketMoverPayload[],
+  rank: 'tradingValue' | 'volume',
+): DashboardMarketMoverPayload[] {
+  const seen = new Set<string>();
+
+  return [...rows]
+    .filter((row) => {
+      if (seen.has(row.code)) return false;
+      seen.add(row.code);
+      return true;
+    })
+    .sort((a, b) => (rank === 'tradingValue' ? b.tradingValue - a.tradingValue : b.volume - a.volume));
+}
+
+function arrayObjects(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+
+  return value.filter((item): item is Record<string, unknown> => isPlainObject(item));
+}
+
+function firstArrayObjectRows(response: Record<string, unknown>): Record<string, unknown>[] {
+  for (const value of Object.values(response)) {
+    const rows = arrayObjects(value);
+    if (rows.length > 0) return rows;
+  }
+
+  return [];
+}
+
+function uniqueRowObjects(rows: Record<string, unknown>[]): Record<string, unknown>[] {
+  const seen = new Set<Record<string, unknown>>();
+
+  return rows.filter((row) => {
+    if (seen.has(row)) return false;
+    seen.add(row);
+    return true;
+  });
+}
+
+function yyyymmddKst(now: Date): string {
+  const kst = new Date(now.getTime() + KST_OFFSET_MS);
+  const y = kst.getUTCFullYear().toString().padStart(4, '0');
+  const m = (kst.getUTCMonth() + 1).toString().padStart(2, '0');
+  const d = kst.getUTCDate().toString().padStart(2, '0');
+
+  return `${y}${m}${d}`;
 }
 
 function firstObject(value: unknown): Record<string, unknown> | null {

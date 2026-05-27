@@ -9,6 +9,7 @@ import type {
 import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
 import type { ObservedSymbolModel } from '@shared/model/universe/observed-symbol.model';
 import { CollectorShardAssignmentService } from '@roles/collector/service/collector-shard-assignment.service';
+import { HeldPositionDemandService } from '@roles/collector/service/held-position-demand.service';
 import { StrategyDemandService } from '@roles/collector/service/strategy-demand.service';
 import { UniverseService } from '@roles/collector/service/universe.service';
 import { SubscriptionPlannerService } from '@roles/collector/service/subscription-planner.service';
@@ -55,6 +56,7 @@ export interface SubscriptionStateSnapshot {
   readonly globalDesiredSample: readonly string[];
   readonly chartDesiredCount: number;
   readonly strategyDesiredCount: number;
+  readonly positionDesiredCount: number;
   readonly desiredCount: number;
   readonly actualRequestedCount: number;
   readonly actualEffectiveCount: number;
@@ -115,6 +117,8 @@ export class RefreshUniverseUsecase {
 
   private strategyDesiredCount = 0;
 
+  private positionDesiredCount = 0;
+
   private actualSymbols: readonly string[] = [];
 
   private capDroppedSymbols: readonly string[] = [];
@@ -144,6 +148,7 @@ export class RefreshUniverseUsecase {
     private readonly universe: UniverseService,
     private readonly assignment: CollectorShardAssignmentService,
     private readonly strategyDemand: StrategyDemandService,
+    private readonly heldPositionDemand: HeldPositionDemandService,
     private readonly planner: SubscriptionPlannerService,
   ) {}
 
@@ -193,6 +198,7 @@ export class RefreshUniverseUsecase {
       globalDesiredSample: sample(globalDesired),
       chartDesiredCount: this.chartDesiredCount,
       strategyDesiredCount: this.strategyDesiredCount,
+      positionDesiredCount: this.positionDesiredCount,
       desiredCount: desired.length,
       actualRequestedCount: actualRequested.length,
       actualEffectiveCount: actualEffective.length,
@@ -231,11 +237,13 @@ export class RefreshUniverseUsecase {
 
     let chartSymbols: ObservedSymbolModel[];
     let strategySymbols: ObservedSymbolModel[];
+    let positionSymbols: ObservedSymbolModel[];
 
     try {
-      [chartSymbols, strategySymbols] = await Promise.all([
+      [chartSymbols, strategySymbols, positionSymbols] = await Promise.all([
         this.readChartObservedSymbols(),
         this.strategyDemand.activeSymbols(),
+        this.heldPositionDemand.activeSymbols(),
       ]);
     } catch (err) {
       this._lastRefreshOk = false;
@@ -247,7 +255,11 @@ export class RefreshUniverseUsecase {
       return;
     }
 
-    const desiredUniverse = this.universe.normalizeDemand(chartSymbols, strategySymbols);
+    const desiredUniverse = this.universe.normalizeDemand(
+      chartSymbols,
+      strategySymbols,
+      positionSymbols,
+    );
 
     this._lastRefreshOk = true;
 
@@ -255,7 +267,7 @@ export class RefreshUniverseUsecase {
     const assignment = await this.assignment.assign(globalTarget);
     const target = [...assignment.assignedSymbols];
 
-    this.universe.applyAssignedSnapshot(chartSymbols, strategySymbols, target);
+    this.universe.applyAssignedSnapshot(chartSymbols, strategySymbols, positionSymbols, target);
 
     this.desiredSymbols = [...target];
 
@@ -264,6 +276,8 @@ export class RefreshUniverseUsecase {
     this.chartDesiredCount = this.universe.observedFeCount();
 
     this.strategyDesiredCount = this.universe.strategyDemandCount();
+
+    this.positionDesiredCount = this.universe.positionDemandCount();
 
     this.assignedSymbols = [...target];
 

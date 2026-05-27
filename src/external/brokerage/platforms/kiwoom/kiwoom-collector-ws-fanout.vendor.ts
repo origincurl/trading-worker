@@ -7,6 +7,8 @@ import type {
   BrokerageVendor,
   CancelOrderInput,
   FetchChartCandlesInput,
+  FetchDashboardMarketFlowsInput,
+  FetchDashboardMarketMoversInput,
   FetchMarketIndexSnapshotsInput,
   GetAccountBalanceInput,
   GetPositionsInput,
@@ -27,6 +29,7 @@ import type {
   MarketIndexSnapshot,
   StockMasterEntry,
 } from '../../vendor/brokerage.vendor';
+import type { DashboardMarketFlowPayload, DashboardMarketMoverPayload } from '@shared/event/market-dashboard.event';
 import type { CredentialSourceService } from '../../credential/credential-source.service';
 import type { AccessTokenCacheService } from '../../auth/access-token-cache.service';
 import type { CredentialUsageService } from '../../credential/credential-usage.service';
@@ -103,6 +106,21 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
 
   fetchMarketIndexSnapshots(input: FetchMarketIndexSnapshotsInput): Promise<MarketIndexSnapshot[]> {
     return this.opts.delegate.fetchMarketIndexSnapshots(input);
+  }
+
+  fetchDashboardMarketFlows(
+    input: FetchDashboardMarketFlowsInput,
+  ): Promise<DashboardMarketFlowPayload[]> {
+    return this.opts.delegate.fetchDashboardMarketFlows(input);
+  }
+
+  fetchDashboardMarketMovers(input: FetchDashboardMarketMoversInput): Promise<{
+    topTradingValue: DashboardMarketMoverPayload[];
+    topVolume: DashboardMarketMoverPayload[];
+    gainers: DashboardMarketMoverPayload[];
+    losers: DashboardMarketMoverPayload[];
+  }> {
+    return this.opts.delegate.fetchDashboardMarketMovers(input);
   }
 
   placeOrder(input: PlaceOrderInput): Promise<OrderAckModel> {
@@ -214,9 +232,16 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
 
     await this.ensureChildren();
 
+    const marketIndexSymbols =
+      previousMarketIndexes.length > 0 ? previousMarketIndexes : DEFAULT_MARKET_INDEX_SYMBOLS;
+
     await this.subscribeMarketData({
-      symbols: previousMarketIndexes.length > 0 ? previousMarketIndexes : DEFAULT_MARKET_INDEX_SYMBOLS,
+      symbols: marketIndexSymbols,
       kinds: ['market-index'],
+    });
+    await this.subscribeMarketData({
+      symbols: marketIndexSymbols,
+      kinds: ['market-breadth'],
     });
 
     if (previousChartSymbols.length > 0) {
@@ -237,8 +262,10 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     this.lastKinds = input.kinds;
     await this.ensureChildren();
 
+    const requestedSymbols = normalizeSymbols(input.symbols);
     const owned = this.currentOwnedSymbols();
-    const newSymbols = normalizeSymbols(input.symbols).filter((symbol) => !owned.has(symbol));
+    const existingSymbols = requestedSymbols.filter((symbol) => owned.has(symbol));
+    const newSymbols = requestedSymbols.filter((symbol) => !owned.has(symbol));
     const capDropped: string[] = [];
     const byChild = this.partition(
       newSymbols,
@@ -248,15 +275,21 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     );
     this.recordCapDropped(capDropped);
 
-    await Promise.all(
-      Array.from(byChild.entries()).map(async ([credentialId, symbols]) => {
+    await Promise.all([
+      ...Array.from(this.children.values()).map(async (child) => {
+        const symbols = existingSymbols.filter((symbol) => child.symbols.has(symbol));
+        if (symbols.length === 0) return;
+
+        await child.vendor.subscribeMarketData({ symbols, kinds: input.kinds });
+      }),
+      ...Array.from(byChild.entries()).map(async ([credentialId, symbols]) => {
         const child = this.children.get(credentialId);
         if (!child || symbols.length === 0) return;
 
         await child.vendor.subscribeMarketData({ symbols, kinds: input.kinds });
         for (const symbol of symbols) child.symbols.add(symbol);
       }),
-    );
+    ]);
 
     return {
       subscribedSymbols: Array.from(new Set(Array.from(this.children.values()).flatMap((child) => [...child.symbols]))),

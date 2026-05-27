@@ -15,6 +15,7 @@ import type {
 import { IngestTickUsecase } from '@roles/collector/usecase/ingest-tick.usecase';
 import { RefreshUniverseUsecase } from '@roles/collector/usecase/refresh-universe.usecase';
 import { MARKET_INDEX_CODES } from '@shared/event/market-index.event';
+import { DASHBOARD_MARKET_KIWOOM_CODES } from '@shared/event/market-dashboard.event';
 import { resolveMarketRealtimeProfile } from '@roles/collector/market-realtime-profile';
 
 // Connects to Kiwoom WS (LOGIN included), then primes the demand-driven
@@ -81,6 +82,14 @@ export class KiwoomTickSubscriber implements OnApplicationBootstrap, OnApplicati
 
         this.logger.log(
           `market index subscribed: symbols=${indexCodes.join(',')} kinds=[market-index]`,
+        );
+
+        const breadthCodes = Object.values(DASHBOARD_MARKET_KIWOOM_CODES);
+
+        await this.gateway.subscribeMarketData({ symbols: breadthCodes, kinds: ['market-breadth'] });
+
+        this.logger.log(
+          `market breadth subscribed: symbols=${breadthCodes.join(',')} kinds=[market-breadth]`,
         );
       }
 

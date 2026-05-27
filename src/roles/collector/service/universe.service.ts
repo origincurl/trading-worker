@@ -21,6 +21,8 @@ export class UniverseService {
 
   private strategyCount = 0;
 
+  private positionCount = 0;
+
   private lastAppliedAt: Date | null = null;
 
   // Returns the worker-assigned, normalized observation universe.
@@ -45,6 +47,10 @@ export class UniverseService {
     return this.strategyCount;
   }
 
+  positionDemandCount(): number {
+    return this.positionCount;
+  }
+
   lastAppliedAtMs(): number | null {
     return this.lastAppliedAt?.getTime() ?? null;
   }
@@ -54,8 +60,9 @@ export class UniverseService {
   normalizeDemand(
     chartSymbols: readonly ObservedSymbolModel[],
     strategySymbols: readonly ObservedSymbolModel[],
+    positionSymbols: readonly ObservedSymbolModel[] = [],
   ): ObservedSymbolModel[] {
-    return this.normalize([...chartSymbols, ...strategySymbols]);
+    return this.normalize([...chartSymbols, ...strategySymbols, ...positionSymbols]);
   }
 
   // Replaces the in-memory universe atomically with the worker-owned subset of
@@ -65,15 +72,18 @@ export class UniverseService {
   applyAssignedSnapshot(
     chartSymbols: readonly ObservedSymbolModel[],
     strategySymbols: readonly ObservedSymbolModel[],
+    positionSymbols: readonly ObservedSymbolModel[],
     assignedSymbols: readonly string[],
   ): number {
-    const merged = this.normalizeDemand(chartSymbols, strategySymbols);
+    const merged = this.normalizeDemand(chartSymbols, strategySymbols, positionSymbols);
     const assigned = new Set(assignedSymbols);
     const current = merged.filter((symbol) => assigned.has(symbol.symbol));
 
-    this.feCount = this.countSource(merged, 'CHART');
+    this.feCount = this.normalize(chartSymbols).length;
 
-    this.strategyCount = this.countSource(merged, 'STRATEGY');
+    this.strategyCount = this.normalize(strategySymbols).length;
+
+    this.positionCount = this.normalize(positionSymbols).length;
 
     this.desiredSymbols = merged;
 
@@ -84,14 +94,6 @@ export class UniverseService {
     this.logger.log(`universe assigned: global=${merged.length} assigned=${current.length}`);
 
     return this.currentSymbols.length;
-  }
-
-  private countSource(list: readonly ObservedSymbolModel[], source: 'CHART' | 'STRATEGY'): number {
-    return list.reduce((acc, symbol) => {
-      if (symbol.source === source || symbol.source === 'BOTH') return acc + 1;
-
-      return acc;
-    }, 0);
   }
 
   // Dedup by symbol. Sort deterministically so the downstream gateway SUB diff

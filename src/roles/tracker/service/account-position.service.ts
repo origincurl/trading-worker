@@ -1,7 +1,14 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { KIWOOM_CONFIG, type KiwoomConfig } from '@config/kiwoom.config';
+import { REDIS_CLIENT, type RedisClientToken } from '@shared/cache/redis.module';
+import {
+  HELD_POSITION_DEMAND_HINT_CHANNEL,
+  HELD_POSITION_DEMAND_TTL_SEC,
+  heldPositionDemandAccountPattern,
+  heldPositionDemandLeaseKey,
+} from '@shared/cache/held-position-demand.keys';
 import { EXECUTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type { PositionModel } from '@external/brokerage/model/account.model';
 import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
@@ -44,6 +51,7 @@ export class AccountPositionService {
     @InjectRepository(PositionBookEntity)
     private readonly positionBooks: Repository<PositionBookEntity>,
     private readonly eventFactory: WorkerEventFactory,
+    @Optional() @Inject(REDIS_CLIENT) private readonly redis: RedisClientToken,
   ) {}
 
   syncCount(): number {
@@ -86,6 +94,7 @@ export class AccountPositionService {
         })),
       );
       await this.ensureManualPositionBooks(target, vendorPositions, now);
+      await this.refreshHeldSymbolDemandLeases(target, vendorPositions, now);
 
       this._syncCount += 1;
 
@@ -102,6 +111,68 @@ export class AccountPositionService {
       );
 
       return null;
+    }
+  }
+
+
+  private async refreshHeldSymbolDemandLeases(
+    target: TrackerAccountTarget,
+    positions: readonly PositionModel[],
+    syncedAt: Date,
+  ): Promise<void> {
+    if (!this.redis) return;
+
+    const positiveSymbols = new Set(
+      positions
+        .filter((position) => position.quantity > 0)
+        .map((position) => position.symbol.trim().toUpperCase())
+        .filter(Boolean),
+    );
+    const pattern = heldPositionDemandAccountPattern({
+      marketEnv: target.marketEnv,
+      accountExternalId: target.accountExternalId,
+    });
+
+    try {
+      const existingKeys = await scanKeys(this.redis, pattern);
+      let changed = false;
+
+      for (const key of existingKeys) {
+        const symbol = key.split(':').at(-1)?.trim().toUpperCase();
+        if (symbol && positiveSymbols.has(symbol)) continue;
+        const deleted = await this.redis.del(key);
+        if (deleted > 0) changed = true;
+      }
+
+      for (const symbol of positiveSymbols) {
+        const key = heldPositionDemandLeaseKey({
+          marketEnv: target.marketEnv,
+          accountExternalId: target.accountExternalId,
+          symbol,
+        });
+        await this.redis.set(
+          key,
+          JSON.stringify({
+            source: 'tracker-position',
+            accountExternalId: target.accountExternalId,
+            brokerage: target.brokerage,
+            marketEnv: target.marketEnv,
+            symbol,
+            syncedAt: syncedAt.toISOString(),
+          }),
+          'EX',
+          HELD_POSITION_DEMAND_TTL_SEC,
+        );
+        changed = true;
+      }
+
+      if (changed) {
+        await this.redis.publish(HELD_POSITION_DEMAND_HINT_CHANNEL, 'position-demand');
+      }
+    } catch (err) {
+      this.logger.warn(
+        `held-position demand lease refresh failed account=${target.accountExternalId}: ${err instanceof Error ? err.message : err}`,
+      );
     }
   }
 
@@ -171,4 +242,18 @@ export class AccountPositionService {
       );
     }
   }
+}
+
+async function scanKeys(redis: RedisClientToken, pattern: string): Promise<string[]> {
+  if (!redis) return [];
+
+  const keys: string[] = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    cursor = nextCursor;
+    keys.push(...batch);
+  } while (cursor !== '0');
+
+  return keys;
 }

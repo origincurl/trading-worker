@@ -20,6 +20,7 @@ import { DeadLetterService } from './service/dead-letter.service';
 import { FxSnapshotService } from './service/fx-snapshot.service';
 import { MarketIndexSnapshotService } from './service/market-index-snapshot.service';
 import { MarketOrderbookService } from './service/market-orderbook.service';
+import { HeldPositionDemandService } from './service/held-position-demand.service';
 import { MarketTickService } from './service/market-tick.service';
 import { StrategyDemandService } from './service/strategy-demand.service';
 import { SubscriptionPlannerService } from './service/subscription-planner.service';
@@ -51,6 +52,7 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     DeadLetterService,
     MarketIndexSnapshotService,
     FxSnapshotService,
+    HeldPositionDemandService,
     UniverseService,
     StrategyDemandService,
     SubscriptionPlannerService,

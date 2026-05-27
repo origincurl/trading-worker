@@ -35,6 +35,7 @@ export class AccountBalanceRepositoryImpl implements AccountBalanceRepository {
         cashBalance: input.cashBalance,
         availableCash: input.availableCash,
         totalAsset: input.totalAsset,
+        cashDetails: input.cashDetails,
         syncedAt: input.syncedAt.toISOString(),
       };
     }
@@ -56,6 +57,7 @@ export class AccountBalanceRepositoryImpl implements AccountBalanceRepository {
       cashBalance: input.cashBalance,
       availableCash: input.availableCash,
       totalAsset: input.totalAsset,
+      cashDetails: input.cashDetails,
       syncedAt: input.syncedAt,
     });
 

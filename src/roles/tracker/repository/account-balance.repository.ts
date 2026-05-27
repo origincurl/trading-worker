@@ -1,4 +1,4 @@
-import type { AccountBalanceModel } from './account-balance.model';
+import type { AccountBalanceCashDetails, AccountBalanceModel } from './account-balance.model';
 
 export const ACCOUNT_BALANCE_REPOSITORY = Symbol('ACCOUNT_BALANCE_REPOSITORY');
 
@@ -10,6 +10,7 @@ export interface UpsertAccountBalanceInput {
   readonly cashBalance: number;
   readonly availableCash: number | null;
   readonly totalAsset: number | null;
+  readonly cashDetails: AccountBalanceCashDetails | null;
   readonly syncedAt: Date;
 }
 

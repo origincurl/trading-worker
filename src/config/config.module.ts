@@ -1,5 +1,6 @@
 import { Global, Module } from '@nestjs/common';
 import { ADMIN_CONFIG, loadAdminConfig } from './admin.config';
+import { CHART_ARCHIVE_CONFIG, loadChartArchiveConfig } from './chart-archive.config';
 import { COLLECTOR_CONFIG, loadCollectorConfig } from './collector.config';
 import { TRACKER_CONFIG, loadTrackerConfig } from './tracker.config';
 import { KIWOOM_CONFIG, loadKiwoomConfig } from './kiwoom.config';
@@ -16,6 +17,7 @@ export function validateEnv(env: NodeJS.ProcessEnv) {
   const kiwoom = loadKiwoomConfig(env);
   const notify = loadNotifyConfig(env);
   const collector = loadCollectorConfig(env);
+  const chartArchive = loadChartArchiveConfig(env);
   const tracker = loadTrackerConfig(env);
   const notifier = loadNotifierConfig(env);
   const admin = loadAdminConfig(env);
@@ -27,6 +29,7 @@ export function validateEnv(env: NodeJS.ProcessEnv) {
     kiwoom,
     notify,
     collector,
+    chartArchive,
     tracker,
     notifier,
     admin,
@@ -48,6 +51,7 @@ export class ConfigModule {
         { provide: KIWOOM_CONFIG, useValue: config.kiwoom },
         { provide: NOTIFY_CONFIG, useValue: config.notify },
         { provide: COLLECTOR_CONFIG, useValue: config.collector },
+        { provide: CHART_ARCHIVE_CONFIG, useValue: config.chartArchive },
         { provide: TRACKER_CONFIG, useValue: config.tracker },
         { provide: NOTIFIER_CONFIG, useValue: config.notifier },
         { provide: ADMIN_CONFIG, useValue: config.admin },
@@ -59,6 +63,7 @@ export class ConfigModule {
         KIWOOM_CONFIG,
         NOTIFY_CONFIG,
         COLLECTOR_CONFIG,
+        CHART_ARCHIVE_CONFIG,
         TRACKER_CONFIG,
         NOTIFIER_CONFIG,
         ADMIN_CONFIG,

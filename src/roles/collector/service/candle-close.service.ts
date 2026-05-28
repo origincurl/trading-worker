@@ -12,6 +12,7 @@ import {
 } from '@shared/event/market-candle-closed.event';
 import { CANDLE_REPOSITORY, type CandleRepository } from '../repository/candle.repository';
 import type { CandleModel } from './candle.model';
+import { isKrxContinuousSessionBucket } from '@shared/chart-archive/partition-key';
 
 // One closed candle → upsert in DB + produce on Redis Streams.
 // architecture.md §8: closed candles are durable (Streams), realtime ticks
@@ -40,6 +41,13 @@ export class CandleCloseService {
   }
 
   async close(candle: CandleModel, dataSource: 'realtime' | 'catchup'): Promise<void> {
+    if (!isKrxContinuousSessionBucket(candle.bucketStart)) {
+      this.logger.debug(
+        `skip non-continuous KRX candle (${candle.symbol}@${candle.bucketStart.toISOString()})`,
+      );
+      return;
+    }
+
     const payload: MarketCandleClosedPayload = {
       provider: 'kiwoom',
       marketEnv: candle.marketEnv,

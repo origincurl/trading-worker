@@ -115,6 +115,14 @@ export class ExecutionPersistenceService {
 
         return { inserted: false, orderId: order.id, anomaly: 'invalid-fill', externalFillId };
       }
+      if (decimalToScaled(aggregate.appliedQty, 8) <= 0n) {
+        return {
+          inserted: false,
+          orderId: order.id,
+          anomaly: aggregate.anomaly ?? 'fill-clamped',
+          externalFillId,
+        };
+      }
 
       const fillInserted = await fillRepo
         .createQueryBuilder()
@@ -126,11 +134,11 @@ export class ExecutionPersistenceService {
           stockId: Number(order.stockId),
           externalFillId,
           fillType: payload.side === 'buy' ? 'BUY' : 'SELL',
-          quantity: scaledToDecimal(decimalToScaled(payload.filledQty, 8), 8),
+          quantity: aggregate.appliedQty,
           price: scaledToDecimal(decimalToScaled(payload.filledPrice, 6), 6),
           amount: scaledToDecimal(
             multiplyScaled(
-              decimalToScaled(payload.filledQty, 8),
+              decimalToScaled(aggregate.appliedQty, 8),
               8,
               decimalToScaled(payload.filledPrice, 6),
               6,
@@ -178,7 +186,7 @@ export class ExecutionPersistenceService {
           clientOrderId: payload.clientOrderId || null,
           symbol: payload.symbol,
           side: payload.side,
-          filledQty: payload.filledQty,
+          filledQty: aggregate.appliedQty,
           filledPrice: payload.filledPrice,
           filledAt,
           livePublishedAt: null,

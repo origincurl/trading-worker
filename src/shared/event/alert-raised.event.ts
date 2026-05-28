@@ -2,7 +2,13 @@ export const ALERT_RAISED_EVENT_TYPE = 'alert.raised';
 export const ALERT_RAISED_SCHEMA_VERSION = 1;
 export const ALERT_RAISED_STREAM = 'alert.raised';
 
-export type AlertCategory = 'dead-letter-spike' | 'order-rejection-spike' | 'stale-tick';
+export type AlertCategory =
+  | 'dead-letter-spike'
+  | 'order-rejection-spike'
+  | 'stale-tick'
+  | 'chart-archive-mismatch'
+  | 'chart-archive-failure'
+  | 'krx-calendar-sync';
 export type AlertSeverity = 'info' | 'warning' | 'critical';
 
 export interface AlertRaisedPayload {

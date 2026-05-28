@@ -22,7 +22,7 @@ function resolveLogLevels(env: NodeJS.ProcessEnv): LogLevel[] | undefined {
 }
 
 async function bootstrap() {
-  loadDotenv({ path: '.env.local', override: false });
+  loadDotenv({ path: '.env.local', override: true });
 
   loadDotenv();
 

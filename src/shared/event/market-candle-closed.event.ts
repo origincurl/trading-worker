@@ -26,6 +26,7 @@ export interface MarketCandleClosedPayload {
   readonly low: number;
   readonly close: number;
   readonly volume: number;
+  readonly tradingValue?: number | null;
   readonly tickCount: number;
   readonly firstSourceTs: string;
   readonly lastSourceTs: string;

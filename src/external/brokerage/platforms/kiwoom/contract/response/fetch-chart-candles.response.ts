@@ -24,6 +24,15 @@ export interface KiwoomChartCandleRowContract {
   readonly trde_qty?: string;
   readonly trd_qty?: string;
   readonly cntr_qty?: string;
+  // Trading value. Field names are kept broad because ka10080 naming
+  // differs across Kiwoom examples; capture scripts should confirm which
+  // one is populated before enabling field-only archive backfill.
+  readonly trde_prica?: string;
+  readonly acc_trde_prica?: string;
+  readonly trade_value?: string;
+  readonly trading_value?: string;
+  readonly trde_amt?: string;
+  readonly acc_trde_amt?: string;
 }
 
 export interface FetchChartCandlesResponseContract {

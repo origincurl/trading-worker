@@ -9,6 +9,7 @@ import type {
   DashboardMarketFlowPayload,
   DashboardMarketMoverPayload,
 } from '@shared/event/market-dashboard.event';
+import type { CredentialUsagePriority } from '@external/brokerage/credential/credential-usage.service';
 
 export interface GetAccountBalanceInput {
   readonly accountId: string;
@@ -78,6 +79,7 @@ export interface FetchChartCandlesInput {
   readonly baseDt?: string;
   readonly acceptFromIso?: string;
   readonly acceptToIso?: string;
+  readonly priority?: CredentialUsagePriority;
 }
 
 // Phase E: stock master list. One entry per listed symbol on a given

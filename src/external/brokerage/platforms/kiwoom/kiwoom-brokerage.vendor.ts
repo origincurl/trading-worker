@@ -464,7 +464,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         body,
         usage: {
           origin: 'COLLECTOR_MARKET',
-          priority: 'P2',
+          priority: input.priority ?? 'P2',
           actionType: 'MARKET_DATA',
           endpointType: 'REST_CHART',
         },
@@ -505,6 +505,16 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
         const volume = parseKiwoomAbsoluteNumberOrNull(
           row.tradeVolume ?? row.trde_qty ?? row.trd_qty ?? row.cntr_qty,
         );
+        const tradingValue = parseSignedNumberAbs(
+          pickValue(row as unknown as Record<string, unknown>, [
+            'trde_prica',
+            'acc_trde_prica',
+            'trade_value',
+            'trading_value',
+            'trde_amt',
+            'acc_trde_amt',
+          ]),
+        );
 
         if (open === null || high === null || low === null || close === null) continue;
 
@@ -531,6 +541,7 @@ export class KiwoomBrokerageVendor implements BrokerageVendor {
           low,
           close,
           volume: volume ?? 0,
+          tradingValue,
           tickCount: 0,
           firstSourceTs: bucketStart,
           lastSourceTs: bucketStart,

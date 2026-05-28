@@ -105,11 +105,11 @@ function parseExecution(
   const status = strField(values[FID.ORDER_STATUS]);
   const sideRaw = strField(values[FID.SIDE_CODE]) ?? strField(values[FID.SIDE_TEXT]);
   const filledQty =
-    parseSignedNumber(values[FID.EXECUTED_QTY]) ??
-    parseSignedNumber(values[FID.UNIT_EXECUTED_QTY]);
+    parseSignedNumber(values[FID.UNIT_EXECUTED_QTY]) ??
+    parseSignedNumber(values[FID.EXECUTED_QTY]);
   const filledPrice =
-    parseSignedNumber(values[FID.EXECUTED_PRICE]) ??
-    parseSignedNumber(values[FID.UNIT_EXECUTED_PRICE]);
+    parseSignedNumber(values[FID.UNIT_EXECUTED_PRICE]) ??
+    parseSignedNumber(values[FID.EXECUTED_PRICE]);
   const filledAt = parseHhmmssToDate(values[FID.EXECUTED_TIME], ctx.receivedAt);
   const fillNo = strField(values[FID.FILL_NO]);
 

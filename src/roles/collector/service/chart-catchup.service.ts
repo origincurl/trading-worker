@@ -1,14 +1,17 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { COLLECTOR_BROKERAGE_VENDOR } from '@external/brokerage/brokerage.token';
 import type { BrokerageVendor } from '@external/brokerage/vendor/brokerage.vendor';
 import {
   CANDLE_REPOSITORY,
   type CandleRepository,
 } from '@roles/collector/repository/candle.repository';
+import { isKrxContinuousSessionBucket } from '@shared/chart-archive/partition-key';
 import type {
   CandleChartMarket,
   MarketCandleClosedPayload,
 } from '@shared/event/market-candle-closed.event';
+import { ChartArchiveWriterService } from '@roles/collector/chart-archive/chart-archive-writer.service';
 import { ChartEmptyRangeService } from './chart-empty-range.service';
 
 // Phase E: actual catchup execution body — vendor fetch + candle upsert.
@@ -32,6 +35,7 @@ export interface ChartCatchupRequest {
     readonly fromIso: string;
     readonly toIso: string;
   }>;
+  readonly archiveToS3?: boolean;
 }
 
 export interface ChartCatchupResult {
@@ -48,6 +52,7 @@ export class ChartCatchupService {
     @Inject(COLLECTOR_BROKERAGE_VENDOR) private readonly gateway: BrokerageVendor,
     @Inject(CANDLE_REPOSITORY) private readonly repo: CandleRepository,
     private readonly emptyRanges: ChartEmptyRangeService,
+    private readonly archiveWriter: ChartArchiveWriterService,
   ) {}
 
   async run(request: ChartCatchupRequest): Promise<ChartCatchupResult> {
@@ -68,15 +73,31 @@ export class ChartCatchupService {
         acceptFromIso: request.acceptFromIso,
         acceptToIso: request.acceptToIso,
       });
+      const persistableRows = rows.filter((row) => isPersistableCatchupRow(request, row));
 
-      for (const row of rows) {
+      for (const row of persistableRows) {
         const r = await this.repo.upsertClosed(row);
 
         if (r === 'skipped') skipped += 1;
         else written += 1;
       }
 
-      await this.recordEmptyTargets(request, rows);
+      await this.recordEmptyTargets(request, persistableRows);
+      if (request.archiveToS3) {
+        if (request.intervalType === '1m') {
+          await this.archiveCatchupRows(request, persistableRows).catch((err) => {
+            this.logger.warn(
+              `catchup S3 archive failed request=${request.requestId}: ${
+                err instanceof Error ? err.message : err
+              }`,
+            );
+          });
+        } else {
+          this.logger.warn(
+            `skip S3 archive catchup for non-1m request=${request.requestId} interval=${request.intervalType}`,
+          );
+        }
+      }
     } catch (err) {
       errors.push({
         code: 'kiwoom-chart-failed',
@@ -89,6 +110,27 @@ export class ChartCatchupService {
     }
 
     return { candlesWritten: written, candlesSkipped: skipped, errors };
+  }
+
+  private async archiveCatchupRows(
+    request: ChartCatchupRequest,
+    rows: readonly MarketCandleClosedPayload[],
+  ): Promise<void> {
+    const byTradeDate = new Map<string, MarketCandleClosedPayload[]>();
+    for (const row of rows) {
+      const tradeDate = toKstTradeDate(row.bucketStart);
+      byTradeDate.set(tradeDate, [...(byTradeDate.get(tradeDate) ?? []), row]);
+    }
+    for (const [tradeDate, candles] of byTradeDate.entries()) {
+      await this.archiveWriter.archiveBackfillCandles({
+        marketEnv: request.marketEnv,
+        symbol: request.symbol,
+        tradeDate,
+        sourceRunId: stableUuidFromRequestId(request.requestId),
+        candles,
+        requireReady: true,
+      });
+    }
   }
 
   private async recordEmptyTargets(
@@ -121,4 +163,23 @@ export class ChartCatchupService {
       }
     }
   }
+}
+
+function toKstTradeDate(iso: string): string {
+  return new Date(new Date(iso).getTime() + 9 * 60 * 60_000).toISOString().slice(0, 10);
+}
+
+function isPersistableCatchupRow(
+  request: ChartCatchupRequest,
+  row: MarketCandleClosedPayload,
+): boolean {
+  if (request.intervalType !== '1m') return true;
+
+  return isKrxContinuousSessionBucket(row.bucketStart);
+}
+
+function stableUuidFromRequestId(requestId: string): string {
+  const hex = createHash('sha256').update(requestId).digest('hex').slice(0, 32);
+
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }

@@ -21,6 +21,56 @@ export class StockRepositoryImpl implements StockRepository {
     return rows.map((r) => r.toModel());
   }
 
+  async findActiveListedStocks(): Promise<StockModel[]> {
+    if (!this.repo) return [];
+
+    const rows = await this.repo
+      .createQueryBuilder('s')
+      .where('s.is_active = true')
+      .andWhere('s.is_tradable = true')
+      .andWhere('s.deleted_at IS NULL')
+      .andWhere('s.delisted_at IS NULL')
+      .orderBy('s.symbol', 'ASC')
+      .getMany();
+
+    return rows.map((r) => r.toModel());
+  }
+
+  async getArchivePreflightStats(threshold: Date): Promise<{
+    activeListedCount: number;
+    syncedAfterThresholdCount: number;
+    maxLastSyncedAt: Date | null;
+  }> {
+    if (!this.repo) {
+      return { activeListedCount: 0, syncedAfterThresholdCount: 0, maxLastSyncedAt: null };
+    }
+
+    const row = await this.repo
+      .createQueryBuilder('s')
+      .select('COUNT(*)::int', 'activeListedCount')
+      .addSelect(
+        `COUNT(*) FILTER (WHERE s.last_synced_at >= :threshold)::int`,
+        'syncedAfterThresholdCount',
+      )
+      .addSelect('MAX(s.last_synced_at)', 'maxLastSyncedAt')
+      .where('s.is_active = true')
+      .andWhere('s.is_tradable = true')
+      .andWhere('s.deleted_at IS NULL')
+      .andWhere('s.delisted_at IS NULL')
+      .setParameter('threshold', threshold)
+      .getRawOne<{
+        activeListedCount: number | string;
+        syncedAfterThresholdCount: number | string;
+        maxLastSyncedAt: Date | string | null;
+      }>();
+
+    return {
+      activeListedCount: Number(row?.activeListedCount ?? 0),
+      syncedAfterThresholdCount: Number(row?.syncedAfterThresholdCount ?? 0),
+      maxLastSyncedAt: row?.maxLastSyncedAt ? new Date(row.maxLastSyncedAt) : null,
+    };
+  }
+
   async findBySymbol(symbol: string): Promise<StockModel | null> {
     if (!this.repo) return null;
 

@@ -26,24 +26,6 @@ interface ExecutionWsConnection {
   readonly client: KiwoomWsClient;
 }
 
-const SYNC_INTERVAL_MS = readPositiveInt(
-  process.env.TRACKER_EXECUTION_WS_SYNC_INTERVAL_MS,
-  5_000,
-);
-const LOGIN_ACK_TIMEOUT_MS = readPositiveInt(
-  process.env.TRACKER_EXECUTION_WS_LOGIN_ACK_TIMEOUT_MS,
-  5_000,
-);
-const BACKOFF_INITIAL_MS = readPositiveInt(
-  process.env.TRACKER_EXECUTION_WS_BACKOFF_INITIAL_MS,
-  5_000,
-);
-const BACKOFF_MAX_MS = readPositiveInt(
-  process.env.TRACKER_EXECUTION_WS_BACKOFF_MAX_MS,
-  60_000,
-);
-const ENABLED = process.env.TRACKER_EXECUTION_WS_ENABLED === 'true';
-
 // Account-scoped execution WS manager. Each active account credential gets
 // one Redis lease; only the lease owner opens the Kiwoom execution socket.
 // Kiwoom publishes account-owned execution frames after LOGIN, so this path
@@ -64,6 +46,26 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
 
   private syncing = false;
 
+  private readonly syncIntervalMs = readPositiveInt(
+    process.env.TRACKER_EXECUTION_WS_SYNC_INTERVAL_MS,
+    5_000,
+  );
+
+  private readonly loginAckTimeoutMs = readPositiveInt(
+    process.env.TRACKER_EXECUTION_WS_LOGIN_ACK_TIMEOUT_MS,
+    5_000,
+  );
+
+  private readonly backoffInitialMs = readPositiveInt(
+    process.env.TRACKER_EXECUTION_WS_BACKOFF_INITIAL_MS,
+    5_000,
+  );
+
+  private readonly backoffMaxMs = readPositiveInt(
+    process.env.TRACKER_EXECUTION_WS_BACKOFF_MAX_MS,
+    60_000,
+  );
+
   constructor(
     private readonly ownership: TrackerWsOwnershipService,
     private readonly tokenCache: AccessTokenCacheService,
@@ -78,7 +80,7 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    if (!ENABLED) {
+    if (!executionWsEnabled()) {
       this.logger.warn('execution WS disabled (set TRACKER_EXECUTION_WS_ENABLED=true to enable)');
 
       return;
@@ -88,9 +90,9 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
 
     this.syncTimer = setInterval(() => {
       this.syncConnections().catch((err) => this.warnSync(err));
-    }, SYNC_INTERVAL_MS);
+    }, this.syncIntervalMs);
 
-    this.logger.log(`execution WS sync every ${SYNC_INTERVAL_MS}ms`);
+    this.logger.log(`execution WS sync every ${this.syncIntervalMs}ms`);
   }
 
   async onApplicationShutdown(): Promise<void> {
@@ -323,8 +325,10 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
     const ack = new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         unsubscribe();
-        reject(new Error(`Kiwoom execution LOGIN ack timeout after ${LOGIN_ACK_TIMEOUT_MS}ms`));
-      }, LOGIN_ACK_TIMEOUT_MS);
+        reject(
+          new Error(`Kiwoom execution LOGIN ack timeout after ${this.loginAckTimeoutMs}ms`),
+        );
+      }, this.loginAckTimeoutMs);
 
       const unsubscribe = client.onMessage((parsed) => {
         if (!isPlainObject(parsed) || parsed.trnm !== 'LOGIN') return;
@@ -391,7 +395,10 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
     err: unknown,
   ): void {
     const count = (this.failureCounts.get(key) ?? 0) + 1;
-    const delayMs = Math.min(BACKOFF_MAX_MS, BACKOFF_INITIAL_MS * 2 ** Math.min(count - 1, 5));
+    const delayMs = Math.min(
+      this.backoffMaxMs,
+      this.backoffInitialMs * 2 ** Math.min(count - 1, 5),
+    );
     const message = err instanceof Error ? err.message : String(err);
 
     this.failureCounts.set(key, count);
@@ -406,6 +413,10 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
     this.failureCounts.delete(key);
     this.backoffUntil.delete(key);
   }
+}
+
+function executionWsEnabled(): boolean {
+  return process.env.TRACKER_EXECUTION_WS_ENABLED?.trim().toLowerCase() === 'true';
 }
 
 function readPositiveInt(value: string | undefined, fallback: number): number {

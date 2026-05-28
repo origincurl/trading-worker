@@ -105,6 +105,38 @@ describe('KiwoomBrokerageVendor.fetchChartCandles', () => {
     expect(candles[0]?.bucketStart).toBe('2026-05-20T00:00:00.000Z');
   });
 
+  it('captures tradingValue when ka10080 provides a trading-value field', async () => {
+    const requests: Array<KiwoomRequestOptions<unknown>> = [];
+    const vendor = makeVendor(
+      {
+        stk_min_pole_chart_qry: [
+          {
+            cntr_tm: '20260520090000',
+            open_pric: '274000',
+            high_pric: '274500',
+            low_pric: '273500',
+            cur_prc: '274250',
+            trde_qty: '1200',
+            trde_prica: '329100000',
+          },
+        ],
+      },
+      requests,
+    );
+
+    const candles = await vendor.fetchChartCandles({
+      symbol: '005930',
+      marketEnv: 'mock',
+      chartMarket: 'KRW',
+      intervalType: '1m',
+      fromIso: '2026-05-20T00:00:00.000Z',
+      toIso: '2026-05-20T00:01:00.000Z',
+    });
+
+    expect(candles).toHaveLength(1);
+    expect(candles[0]?.tradingValue).toBe(329100000);
+  });
+
   it('maps AL chart market to Kiwoom _AL request symbol while persisting base symbol', async () => {
     const requests: Array<KiwoomRequestOptions<unknown>> = [];
     const vendor = makeVendor(

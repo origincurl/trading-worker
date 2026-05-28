@@ -22,6 +22,14 @@ export interface UpsertStockInput {
 export interface StockRepository {
   // Admin-observed universe (is_observed=true, soft-deleted excluded).
   findObservedStocks(): Promise<StockModel[]>;
+  // Chart archive universe: all active listed tradable stocks, independent
+  // of FE observation demand.
+  findActiveListedStocks(): Promise<StockModel[]>;
+  getArchivePreflightStats(threshold: Date): Promise<{
+    activeListedCount: number;
+    syncedAfterThresholdCount: number;
+    maxLastSyncedAt: Date | null;
+  }>;
   findBySymbol(symbol: string): Promise<StockModel | null>;
   findById(id: number): Promise<StockModel | null>;
   // External key = (marketCode, symbol). Resolves to internal id without

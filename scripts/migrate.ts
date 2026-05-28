@@ -8,7 +8,7 @@ import { Client } from 'pg';
 // and applies each file inside a transaction. Already-applied files
 // (tracked in schema_migrations) are skipped.
 
-loadDotenv({ path: '.env.local', override: false });
+loadDotenv({ path: '.env.local', override: true });
 loadDotenv();
 
 async function main(): Promise<void> {

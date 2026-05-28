@@ -39,7 +39,8 @@ export class ProcessChartCatchupUsecase {
     );
 
     if (result.errors.length > 0) {
-      throw new IntegrationError(`chart catchup failed request=${request.requestId}`, {
+      const detail = result.errors.map((error) => `${error.code}: ${error.detail}`).join('; ');
+      throw new IntegrationError(`chart catchup failed request=${request.requestId}: ${detail}`, {
         requestId: request.requestId,
         symbol: request.symbol,
         errors: result.errors,

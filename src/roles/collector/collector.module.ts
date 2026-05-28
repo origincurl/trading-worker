@@ -2,6 +2,16 @@ import { Logger, Module, type OnApplicationBootstrap } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BrokerageModule } from '@external/brokerage/brokerage.module';
 import { COLLECTOR_METRICS, COLLECTOR_STATUS } from '@roles/role-status';
+import { ChartArchiveAuditService } from './chart-archive/chart-archive-audit.service';
+import { ChartArchiveAlertService } from './chart-archive/chart-archive-alert.service';
+import { ChartArchiveManifestRepository } from './chart-archive/chart-archive-manifest.repository';
+import { ChartArchiveRebuildSubscriber } from './chart-archive/chart-archive-rebuild.subscriber';
+import { ChartArchiveS3Service } from './chart-archive/chart-archive-s3.service';
+import { ChartArchiveScheduler } from './chart-archive/chart-archive.scheduler';
+import { ChartArchiveTaskRepository } from './chart-archive/chart-archive-task.repository';
+import { ChartArchiveWriterService } from './chart-archive/chart-archive-writer.service';
+import { KrxCalendarSyncService } from './chart-archive/krx-calendar-sync.service';
+import { KrxCalendarService } from './chart-archive/krx-calendar.service';
 import { CandleEntity } from './repository/candle.entity';
 import { CANDLE_REPOSITORY } from './repository/candle.repository';
 import { CandleRepositoryImpl } from './repository/candle.repository.impl';
@@ -58,6 +68,15 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     UniverseService,
     StrategyDemandService,
     SubscriptionPlannerService,
+    KrxCalendarService,
+    ChartArchiveAlertService,
+    ChartArchiveAuditService,
+    ChartArchiveS3Service,
+    ChartArchiveManifestRepository,
+    ChartArchiveRebuildSubscriber,
+    ChartArchiveTaskRepository,
+    ChartArchiveWriterService,
+    KrxCalendarSyncService,
     CandleRepositoryImpl,
     DeadLetterRepositoryImpl,
     { provide: CANDLE_REPOSITORY, useExisting: CandleRepositoryImpl },
@@ -74,6 +93,7 @@ import { SyncStockListUsecase } from './usecase/sync-stock-list.usecase';
     CandleFlushScheduler,
     UniverseRefreshScheduler,
     StockListSyncScheduler,
+    ChartArchiveScheduler,
     { provide: COLLECTOR_STATUS, useExisting: CollectorStatusService },
     { provide: COLLECTOR_METRICS, useExisting: CollectorStatusService },
   ],

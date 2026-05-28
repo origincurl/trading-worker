@@ -123,6 +123,36 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
     return this.opts.delegate.fetchDashboardMarketMovers(input);
   }
 
+  async probeAccessToken(): Promise<string> {
+    const probe = (this.opts.delegate as { probeAccessToken?: () => Promise<string> })
+      .probeAccessToken;
+
+    if (!probe) {
+      throw new DomainError(
+        'collector delegate does not support access-token probe',
+        'COLLECTOR_PROBE_UNSUPPORTED',
+      );
+    }
+
+    return probe.call(this.opts.delegate);
+  }
+
+  async probeAccessTokenForAccount(accountId: number): Promise<string> {
+    const probe = (
+      this.opts.delegate as { probeAccessTokenForAccount?: (accountId: number) => Promise<string> }
+    ).probeAccessTokenForAccount;
+
+    if (!probe) {
+      throw new DomainError(
+        'collector delegate does not support account access-token probe',
+        'COLLECTOR_ACCOUNT_PROBE_UNSUPPORTED',
+        { accountId },
+      );
+    }
+
+    return probe.call(this.opts.delegate, accountId);
+  }
+
   placeOrder(input: PlaceOrderInput): Promise<OrderAckModel> {
     return this.opts.delegate.placeOrder(input);
   }
@@ -394,7 +424,7 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
       const tokenSupplier = async () => ({
         token: await this.opts.tokenCache.getAccessToken(material),
         credential: { kind: 'collector' as const, credentialId: material.credentialId },
-        invalidate: () => this.opts.tokenCache.invalidate(material.credentialId),
+        invalidate: () => this.opts.tokenCache.invalidate(material.kind, material.credentialId),
       });
       const vendor = new KiwoomBrokerageVendor({
         profile: 'collector',
@@ -407,7 +437,7 @@ export class KiwoomCollectorWsFanoutVendor implements BrokerageVendor {
         tokenSupplier,
         usage: this.opts.usage,
         collectorRuntimeState: this.opts.collectorRuntimeState,
-        invalidateToken: () => this.opts.tokenCache.invalidate(material.credentialId),
+        invalidateToken: () => this.opts.tokenCache.invalidate(material.kind, material.credentialId),
         reconnect: { enabled: true },
       });
 

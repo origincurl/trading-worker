@@ -62,7 +62,7 @@ function buildKiwoomGateway(
     return {
       token,
       credential: { kind: 'collector', credentialId: material.credentialId },
-      invalidate: () => tokenCache.invalidate(material.credentialId),
+      invalidate: () => tokenCache.invalidate(material.kind, material.credentialId),
     };
   };
 
@@ -85,7 +85,7 @@ function buildKiwoomGateway(
       return {
         token,
         credential: { kind: 'collector', credentialId: material.credentialId },
-        invalidate: () => tokenCache.invalidate(material.credentialId),
+        invalidate: () => tokenCache.invalidate(material.kind, material.credentialId),
       };
     } catch (err) {
       if (stickyCollectorWsMaterial?.credentialId === material.credentialId) {
@@ -195,7 +195,7 @@ function buildKiwoomGateway(
       // credential last used by the WS supplier. REST/account suppliers
       // intentionally do not update this id.
       if (lastWsCredentialId !== null) {
-        tokenCache.invalidate(lastWsCredentialId);
+        tokenCache.invalidate('collector', lastWsCredentialId);
         if (stickyCollectorWsMaterial?.credentialId === lastWsCredentialId) {
           stickyCollectorWsMaterial = null;
         }

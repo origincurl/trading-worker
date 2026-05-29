@@ -17,7 +17,10 @@ interface CachedEntry {
   readonly bundle: AccessTokenBundle;
 }
 
-// In-memory access-token cache keyed by credentialId. Issues on first
+// In-memory access-token cache keyed by (credential kind, credentialId).
+// The numeric ids come from different tables and can overlap, e.g.
+// `collector_credentials.id=1` and `api_credentials.id=1`.
+// Issues on first
 // access, refreshes when ≤5min before expiry, falls back to re-issue on
 // refresh failure. On hard auth failure the credential is pushed onto
 // CredentialCooldownService so the source service skips it next round.
@@ -25,9 +28,9 @@ interface CachedEntry {
 export class AccessTokenCacheService {
   private readonly logger = new Logger(AccessTokenCacheService.name);
 
-  private readonly cache = new Map<number, CachedEntry>();
+  private readonly cache = new Map<string, CachedEntry>();
 
-  private readonly inflight = new Map<number, Promise<string>>();
+  private readonly inflight = new Map<string, Promise<string>>();
 
   constructor(
     private readonly tokenService: KiwoomTokenService,
@@ -41,29 +44,31 @@ export class AccessTokenCacheService {
   // the same material — callers always pass the freshly-selected material
   // so the credential's appKey/appSecret stay consistent across calls.
   async getAccessToken(material: BrokerageCredentialMaterial): Promise<string> {
-    const existing = this.cache.get(material.credentialId);
+    const key = accessTokenCacheKey(material);
+    const existing = this.cache.get(key);
     const now = Date.now();
 
     if (existing && existing.bundle.tokenExpiresAt.getTime() - now > REFRESH_BUFFER_MS) {
       return existing.bundle.accessToken;
     }
 
-    const inflight = this.inflight.get(material.credentialId);
+    const inflight = this.inflight.get(key);
 
     if (inflight) return inflight;
 
     const promise = this.issueOrRefresh(material, existing).finally(() => {
-      this.inflight.delete(material.credentialId);
+      this.inflight.delete(key);
     });
 
-    this.inflight.set(material.credentialId, promise);
+    this.inflight.set(key, promise);
 
     return promise;
   }
 
-  invalidate(credentialId: number): void {
-    if (this.cache.delete(credentialId)) {
-      this.logger.warn(`access-token cache invalidated credentialId=${credentialId}`);
+  invalidate(kind: 'collector' | 'executor', credentialId: number): void {
+    const key = accessTokenCacheKey({ kind, credentialId });
+    if (this.cache.delete(key)) {
+      this.logger.warn(`access-token cache invalidated key=${key}`);
     }
   }
 
@@ -76,7 +81,7 @@ export class AccessTokenCacheService {
         ? await this.tokenService.refreshAccessToken(material, existing.bundle)
         : await this.tokenService.issueAccessToken(material);
 
-      this.cache.set(material.credentialId, { material, bundle });
+      this.cache.set(accessTokenCacheKey(material), { material, bundle });
       await this.markCollectorSuccess(material);
 
       return bundle.accessToken;
@@ -84,17 +89,18 @@ export class AccessTokenCacheService {
       // Refresh path: fall through to a fresh issue on the assumption
       // the refresh token is stale / vendor doesn't support refresh.
       if (existing) {
-        this.cache.delete(material.credentialId);
+        this.cache.delete(accessTokenCacheKey(material));
 
         try {
           const bundle = await this.tokenService.issueAccessToken(material);
 
-          this.cache.set(material.credentialId, { material, bundle });
+          this.cache.set(accessTokenCacheKey(material), { material, bundle });
           await this.markCollectorSuccess(material);
 
           return bundle.accessToken;
         } catch (issueErr) {
           this.cooldown.setCooldown(
+            material.kind,
             material.credentialId,
             AUTH_FAIL_COOLDOWN_MS,
             redactPotentialSecrets(
@@ -108,6 +114,7 @@ export class AccessTokenCacheService {
       }
 
       this.cooldown.setCooldown(
+        material.kind,
         material.credentialId,
         AUTH_FAIL_COOLDOWN_MS,
         redactPotentialSecrets(err instanceof Error ? err.message : String(err)) ??
@@ -150,6 +157,10 @@ export class AccessTokenCacheService {
       source: 'TOKEN',
     });
   }
+}
+
+function accessTokenCacheKey(material: Pick<BrokerageCredentialMaterial, 'kind' | 'credentialId'>): string {
+  return `${material.kind}:${material.credentialId}`;
 }
 
 function isBrokerRateLimited(err: unknown): boolean {

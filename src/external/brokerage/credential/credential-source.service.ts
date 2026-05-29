@@ -137,7 +137,7 @@ export class CredentialSourceService {
     now: number,
     endpoint: 'REST' | 'WS',
   ): string | null {
-    if (this.cooldown.isOnCooldown(credentialId)) return 'IN_MEMORY_COOLDOWN';
+    if (this.cooldown.isOnCooldown('collector', credentialId)) return 'IN_MEMORY_COOLDOWN';
 
     const policy = limitState.policies.get(credentialId);
     if (policy && !policy.isEnabled) return 'POLICY_DISABLED';
@@ -202,7 +202,7 @@ export class CredentialSourceService {
     const all = await this.accountCredRepo.findByAccountId(accountId);
     const eligible = all
       .filter((c) => c.isActive && c.apiCredentialId !== null && c.brokerage && c.marketEnv)
-      .filter((c) => !this.cooldown.isOnCooldown(c.apiCredentialId as number));
+      .filter((c) => !this.cooldown.isOnCooldown('executor', c.apiCredentialId as number));
 
     if (eligible.length === 0) {
       throw new DomainError(
@@ -266,7 +266,7 @@ export class CredentialSourceService {
         c.apiCredentialId === apiCredentialId &&
         c.brokerage &&
         c.marketEnv &&
-        !this.cooldown.isOnCooldown(apiCredentialId),
+        !this.cooldown.isOnCooldown('executor', apiCredentialId),
     );
 
     if (!picked || !picked.brokerage || !picked.marketEnv || picked.apiCredentialId === null) {

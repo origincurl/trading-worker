@@ -172,7 +172,7 @@ export class KiwoomExecutionSubscriber implements OnApplicationBootstrap, OnAppl
           actionType: 'WS',
           endpointType: 'WS_EXECUTION',
         },
-        invalidate: () => this.tokenCache.invalidate(material.credentialId),
+        invalidate: () => this.tokenCache.invalidate(material.kind, material.credentialId),
       }),
     });
 
